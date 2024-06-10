@@ -1,0 +1,17 @@
+
+define nice
+    69
+end
+
+define @Maybe
+    :box
+    struct Maybe
+        "type" String
+        "value" box
+    end
+    box [] = then
+        Maybe{"None" []}
+    else
+        Maybe{"Some" box}
+    end
+end

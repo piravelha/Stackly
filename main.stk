@@ -1,0 +1,10 @@
+include "std"
+
+struct OpType
+    "name" String
+    "value" Int
+end
+
+OpType{"push-int" iota} :op-type@push-int
+
+op-type@push-int print
