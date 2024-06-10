@@ -1,0 +1,14 @@
+
+define @Mappable
+    :impl :value
+    struct Mappable
+        "value" value
+        "map" impl
+    end
+    Mappable{value impl}
+end
+
+define <$>
+    :fn :mappable
+    mappable "value" . fn mappable "map" . ~
+end

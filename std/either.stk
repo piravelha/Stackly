@@ -1,0 +1,31 @@
+include "std.mappable"
+
+define @Either
+    :right :left
+    struct Either
+        "type" String
+        "left" left
+        "right" right
+    end
+    right [] = then
+        Either{"Left" left right}
+    else
+        Either{"Right" left right}
+    end
+end
+
+define @Either:<$>
+    :fn :either
+    either "type" . "Right" = then
+        either "right" . head :value
+        List{} List{value fn ~} @Either
+    else
+        either "left" . head :value
+        List{value} List{} @Either
+    end
+end
+
+define !Mappable(Either)
+    :either
+    either {@Either:<$>} @Mappable
+end

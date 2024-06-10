@@ -58,6 +58,7 @@ const (
 	OpTypeSub        = iota
 	OpTypeMul        = iota
 	OpTypeDiv        = iota
+	OpTypeMod        = iota
 	OpTypeLt         = iota
 	OpTypeGt         = iota
 	OpTypeEq         = iota
@@ -65,6 +66,7 @@ const (
 	OpTypeOr         = iota
 	OpTypeNot        = iota
 	OpTypePrint      = iota
+	OpTypeShow       = iota
 	OpTypeDup        = iota
 	OpTypeSwap       = iota
 	OpTypeDrop       = iota
@@ -77,6 +79,8 @@ const (
 	OpTypeName       = iota
 	OpTypePrintType  = iota
 	OpTypePrintStack = iota
+
+	OpTypeClearMacroSymbols = iota
 )
 
 type Op struct {
@@ -148,7 +152,7 @@ func lex(file string, code string) []Token {
 	string_regex, _ := regexp.Compile(`^"([^"]*)"`)
 	num_regex, _ := regexp.Compile(`^(\d+)`)
 	symbol_regex, _ := regexp.Compile(`^:([a-z_\-?!@]+)`)
-	name_regex, _ := regexp.Compile(`^([^A-Z\s\d'"{}()][^\s\d'"{}()]*)`)
+	name_regex, _ := regexp.Compile(`^([^A-Z\s\d'"{}][^\s\d'"{}]*)`)
 	struct_regex, _ := regexp.Compile(`^([A-Z][a-zA-Z0-9_]*)`)
 	quote_regex, _ := regexp.Compile(`^([{}])`)
 	for code != "" {
@@ -250,7 +254,7 @@ var (
 	type_alias_env = map[string]interface{}{}
 )
 
-func parse_atom(tokens []Token, current_macros []string, eval bool) (interface{}, []Token) {
+func parse_atom(tokens []Token, current_macros []string, macro_id int, eval bool) (interface{}, []Token) {
 	if tokens[0].Type == TokenTypeInt {
 		return Op{OpTypePushInt, tokens[0]}, tokens[1:]
 	}
@@ -266,11 +270,11 @@ func parse_atom(tokens []Token, current_macros []string, eval bool) (interface{}
 		for range tokens[0].Value {
 			chars = append(chars, Token{TokenTypeName, ":>", tokens[0].Location})
 		}
-		return parse(append(chars, tokens[1:]...), current_macros, eval)
+		return parse(append(chars, tokens[1:]...), current_macros, macro_id, eval)
 	}
 	if tokens[0].Type == TokenTypeNil {
 		if len(tokens) > 1 {
-			elem, tokens := parse_atom(tokens[1:], current_macros, eval)
+			elem, tokens := parse_atom(tokens[1:], current_macros, macro_id, eval)
 			if elem_type, ok := elem.(Type); ok {
 				return Type{RawTypeList, []interface{}{elem_type}}, tokens
 			}
@@ -282,8 +286,9 @@ func parse_atom(tokens []Token, current_macros []string, eval bool) (interface{}
 		var builder strings.Builder
 		for _, cur_macro := range current_macros {
 			builder.WriteString(cur_macro)
-			builder.WriteString("_")
+			builder.WriteString(" ")
 		}
+		builder.WriteString(fmt.Sprintf(" %d ", macro_id))
 		builder.WriteString(new_value)
 		new_tok := Token{tokens[0].Type, builder.String(), tokens[0].Location}
 		symbol_env[new_tok.Value] = true
@@ -317,6 +322,9 @@ func parse_atom(tokens []Token, current_macros []string, eval bool) (interface{}
 		if tokens[0].Value == "/" {
 			return Op{OpTypeDiv, tokens[0]}, tokens[1:]
 		}
+		if tokens[0].Value == "%" {
+			return Op{OpTypeMod, tokens[0]}, tokens[1:]
+		}
 		if tokens[0].Value == "<" {
 			return Op{OpTypeLt, tokens[0]}, tokens[1:]
 		}
@@ -334,6 +342,9 @@ func parse_atom(tokens []Token, current_macros []string, eval bool) (interface{}
 		}
 		if tokens[0].Value == "print" {
 			return Op{OpTypePrint, tokens[0]}, tokens[1:]
+		}
+		if tokens[0].Value == "show" {
+			return Op{OpTypeShow, tokens[0]}, tokens[1:]
 		}
 		if tokens[0].Value == "dup" {
 			return Op{OpTypeDup, tokens[0]}, tokens[1:]
@@ -367,26 +378,41 @@ func parse_atom(tokens []Token, current_macros []string, eval bool) (interface{}
 		}
 		if tokens[0].Value == "then" {
 			then := tokens[0]
-			body, tokens := parse(tokens[1:], current_macros, eval)
+			body, tokens := parse(tokens[1:], current_macros, macro_id, eval)
+			else_ifs := []interface{}{}
+			for tokens[0].Value == "elif" {
+				if len(tokens) == 1 {
+					fmt.Printf("%s:%d:%d: PARSE ERROR: Unterminated 'elif' condition\n", tokens[0].Location.Get()...)
+					os.Exit(1)
+				}
+				cond, new_tokens := parse(tokens[1:], current_macros, macro_id, eval)
+				if new_tokens[0].Value != "do" {
+					fmt.Printf("%s:%d:%d: PARSE ERROR: Unterminated 'elif' body\n", tokens[0].Location.Get()...)
+					os.Exit(1)
+				}
+				body, new_tokens := parse(new_tokens[1:], current_macros, macro_id, eval)
+				tokens = new_tokens
+				else_ifs = append(else_ifs, []interface{}{cond, body})
+			}
 			if tokens[0].Value == "end" {
-				return Tree{TreeTypeThen, []interface{}{body}, then}, tokens[1:]
+				return Tree{TreeTypeThen, []interface{}{body, else_ifs}, then}, tokens[1:]
 			}
 			if tokens[0].Value == "else" {
 				else_ := tokens[0]
-				else_body, tokens := parse(tokens[1:], current_macros, eval)
+				else_body, tokens := parse(tokens[1:], current_macros, macro_id, eval)
 				if tokens[0].Value != "end" {
 					fmt.Printf("%s:%d:%d: PARSE ERROR: Unterminated 'else' body\n", else_.Location.Get()...)
 					os.Exit(1)
 				}
 
-				return Tree{TreeTypeThenElse, []interface{}{body, else_body}, then}, tokens[1:]
+				return Tree{TreeTypeThenElse, []interface{}{body, else_ifs, else_body}, then}, tokens[1:]
 			}
 			fmt.Printf("%s:%d:%d: PARSE ERROR: Unterminated 'then' block\n", then.Location.Get()...)
 			os.Exit(1)
 		}
 		if tokens[0].Value == "while" {
 			while := tokens[0]
-			condition, tokens := parse(tokens[1:], current_macros, eval)
+			condition, tokens := parse(tokens[1:], current_macros, macro_id, eval)
 			if len(tokens) == 0 {
 				fmt.Printf("%s:%d:%d: PARSE ERROR: Unterminated 'while' condition\n", while.Location.Get()...)
 				os.Exit(1)
@@ -396,7 +422,7 @@ func parse_atom(tokens []Token, current_macros []string, eval bool) (interface{}
 				os.Exit(1)
 			}
 			loop := tokens[0]
-			body, tokens := parse(tokens[1:], current_macros, eval)
+			body, tokens := parse(tokens[1:], current_macros, macro_id, eval)
 			if len(tokens) == 0 {
 				fmt.Printf("%s:%d:%d: PARSE ERROR: Unterminated 'loop' block\n", loop.Location.Get()...)
 				os.Exit(1)
@@ -414,7 +440,7 @@ func parse_atom(tokens []Token, current_macros []string, eval bool) (interface{}
 			}
 			name := tokens[1]
 			tokens = tokens[2:]
-			_, new_tokens := parse(tokens, append(current_macros, name.Value), false)
+			_, new_tokens := parse(tokens, append(current_macros, name.Value), macro_id, false)
 			body := tokens[:len(tokens)-len(new_tokens)]
 			tokens = new_tokens
 			if len(tokens) < 1 {
@@ -434,7 +460,8 @@ func parse_atom(tokens []Token, current_macros []string, eval bool) (interface{}
 				fmt.Printf("%s:%d:%d PARSE ERROR: Unterminated include statement\n", include.Location.Get()...)
 				os.Exit(1)
 			}
-			path := tokens[1].Value + ".stk"
+			path := tokens[1].Value
+			path = strings.ReplaceAll(path, ".", "/") + ".stk"
 			file, err := os.Open(path)
 			if err != nil {
 				fmt.Println("Error including file:", err)
@@ -458,13 +485,13 @@ func parse_atom(tokens []Token, current_macros []string, eval bool) (interface{}
 				os.Exit(1)
 			}
 			name := tokens[1]
-			body, tokens := parse_atom(tokens[2:], current_macros, eval)
+			body, tokens := parse_atom(tokens[2:], current_macros, macro_id, eval)
 			if tokens[0].Value != "end" {
 				fmt.Printf("%s:%d:%d PARSE ERROR: Unterminated type alias\n", type_tok.Location.Get()...)
 				os.Exit(1)
 			}
 			type_alias_env[name.Value] = body
-			return parse(tokens[1:], current_macros, eval)
+			return parse(tokens[1:], current_macros, macro_id, eval)
 		}
 		if tokens[0].Value == "struct" {
 			struct_keyword := tokens[0]
@@ -485,7 +512,7 @@ func parse_atom(tokens []Token, current_macros []string, eval bool) (interface{}
 					fmt.Printf("%s:%d:%d: PARSE ERROR: Expected struct field name to be a string\n", struct_keyword.Location.Get()...)
 					os.Exit(1)
 				}
-				field_type, new_tokens := parse_atom(tokens[1:], current_macros, eval)
+				field_type, new_tokens := parse_atom(tokens[1:], current_macros, macro_id, eval)
 				tokens = new_tokens
 				if field_type == nil {
 					fmt.Printf("%s:%d:%d: PARSE ERROR: Expected type after struct field name\n", field_name.Location.Get()...)
@@ -513,11 +540,11 @@ func parse_atom(tokens []Token, current_macros []string, eval bool) (interface{}
 			macro := tokens[0]
 			if !in_current_macros {
 				if macro_tokens, ok := macro_value.([]Token); ok {
-					value, _ := parse(macro_tokens, append(current_macros, tokens[0].Value), eval)
+					value, _ := parse(macro_tokens, append(current_macros, tokens[0].Value), macro_id+1, eval)
 					value_expr := value.(Tree)
-					rest_values, tokens := parse(tokens[1:], current_macros, eval)
+					rest_values, tokens := parse(tokens[1:], current_macros, macro_id, eval)
 					rest_expr := rest_values.(Tree)
-					return Tree{TreeTypeExpression, append(value_expr.Nodes, rest_expr.Nodes...), macro}, tokens
+					return Tree{TreeTypeExpression, append(append(value_expr.Nodes, Op{OpTypeClearMacroSymbols, macro}), rest_expr.Nodes...), macro}, tokens
 				}
 			}
 			fmt.Printf("%s:%d:%d: MACRO ERROR: Recursive macro declaration detected\n", tokens[0].Location.Get()...)
@@ -527,8 +554,9 @@ func parse_atom(tokens []Token, current_macros []string, eval bool) (interface{}
 		var builder strings.Builder
 		for _, cur_macro := range current_macros {
 			builder.WriteString(cur_macro)
-			builder.WriteString("_")
+			builder.WriteString(" ")
 		}
+		builder.WriteString(fmt.Sprintf(" %d ", macro_id))
 		builder.WriteString(new_value)
 		new_tok := Token{tokens[0].Type, builder.String(), tokens[0].Location}
 		_, in_symbols := symbol_env[new_tok.Value]
@@ -536,7 +564,7 @@ func parse_atom(tokens []Token, current_macros []string, eval bool) (interface{}
 			return Op{OpTypeName, new_tok}, tokens[1:]
 		}
 		is_keyword := false
-		for _, keyword := range []string{"then", "define", "else", "end", "while", "loop", "struct"} {
+		for _, keyword := range []string{"then", "define", "else", "elif", "do", "end", "while", "loop", "struct"} {
 			if tokens[0].Value == keyword {
 				is_keyword = true
 			}
@@ -553,7 +581,7 @@ func parse_atom(tokens []Token, current_macros []string, eval bool) (interface{}
 	if tokens[0].Type == TokenTypeQuote {
 		if tokens[0].Value == "{" {
 			open_quote := tokens[0]
-			body, tokens := parse(tokens[1:], current_macros, false)
+			body, tokens := parse(tokens[1:], current_macros, macro_id, false)
 			if tokens[0].Value != "}" {
 				fmt.Printf("%s:%d:%d PARSE ERROR: Unterminated quote definition\n", open_quote.Location.Get()...)
 				os.Exit(1)
@@ -582,7 +610,7 @@ func parse_atom(tokens []Token, current_macros []string, eval bool) (interface{}
 			}
 			return Type{RawTypeStruct, []interface{}{}}, tokens[1:]
 		}
-		body, tokens := parse(tokens[2:], current_macros, eval)
+		body, tokens := parse(tokens[2:], current_macros, macro_id, eval)
 		if tokens[0].Value != "}" {
 			fmt.Printf("%s:%d:%d: PARSE ERROR: Unterminated struct definition\n", struct_name.Location.Get()...)
 			os.Exit(1)
@@ -592,14 +620,14 @@ func parse_atom(tokens []Token, current_macros []string, eval bool) (interface{}
 	return nil, tokens
 }
 
-func parse(tokens []Token, current_macros []string, eval bool) (interface{}, []Token) {
+func parse(tokens []Token, current_macros []string, macro_id int, eval bool) (interface{}, []Token) {
 	if len(tokens) == 0 {
 		return Tree{TreeTypeExpression, []interface{}{}, Token{}}, tokens
 	}
 	first := tokens[0]
 	ops := []interface{}{}
 	for len(tokens) > 0 {
-		op, new_tokens := parse_atom(tokens, current_macros, eval)
+		op, new_tokens := parse_atom(tokens, current_macros, macro_id, eval)
 		tokens = new_tokens
 		if op == nil {
 			break
@@ -610,7 +638,7 @@ func parse(tokens []Token, current_macros []string, eval bool) (interface{}, []T
 }
 
 func parse_tokens(tokens []Token) Tree {
-	tree, tokens := parse(tokens, []string{}, true)
+	tree, tokens := parse(tokens, []string{}, 0, true)
 	if len(tokens) > 0 {
 		fmt.Printf("%s:%d:%d: PARSE ERROR: Invalid syntax\n", tokens[0].Location.Get()...)
 		os.Exit(1)
@@ -649,6 +677,7 @@ func init_repr_maps() {
 	op_type_names[increase_op_type_count()] = "-"
 	op_type_names[increase_op_type_count()] = "*"
 	op_type_names[increase_op_type_count()] = "/"
+	op_type_names[increase_op_type_count()] = "%"
 	op_type_names[increase_op_type_count()] = "<"
 	op_type_names[increase_op_type_count()] = ">"
 	op_type_names[increase_op_type_count()] = "="
@@ -656,6 +685,7 @@ func init_repr_maps() {
 	op_type_names[increase_op_type_count()] = "|"
 	op_type_names[increase_op_type_count()] = "!"
 	op_type_names[increase_op_type_count()] = "print"
+	op_type_names[increase_op_type_count()] = "show"
 	op_type_names[increase_op_type_count()] = "dup"
 	op_type_names[increase_op_type_count()] = "swap"
 	op_type_names[increase_op_type_count()] = "drop"
@@ -881,7 +911,7 @@ func typecheck(program interface{}, stack []TypeStackEntry) []TypeStackEntry {
 			return stack
 		}
 		is_operator := false
-		for _, operator := range []OpType{OpTypeAdd, OpTypeSub, OpTypeMul, OpTypeDiv, OpTypeLt, OpTypeGt} {
+		for _, operator := range []OpType{OpTypeAdd, OpTypeSub, OpTypeMul, OpTypeDiv, OpTypeMod, OpTypeLt, OpTypeGt} {
 			if op.Type == operator {
 				is_operator = true
 			}
@@ -952,6 +982,13 @@ func typecheck(program interface{}, stack []TypeStackEntry) []TypeStackEntry {
 				not_enough_args(op.Value, op.Type, 1, 0)
 			}
 			return stack[:len(stack)-1]
+		}
+		if op.Type == OpTypeShow {
+			if len(stack) < 1 {
+				not_enough_args(op.Value, op.Type, 1, 0)
+			}
+			stack[len(stack)-1] = TypeStackEntry{Type{RawTypeList, []interface{}{Type{RawTypeChar, []interface{}{}}}}, op.Value}
+			return stack
 		}
 		if op.Type == OpTypeDup {
 			if len(stack) < 1 {
@@ -1046,13 +1083,21 @@ func typecheck(program interface{}, stack []TypeStackEntry) []TypeStackEntry {
 			fmt.Printf("%s:%d:%d %s", append(op.Value.Location.Get(), builder.String())...)
 			return stack
 		}
+		if op.Type == OpTypeClearMacroSymbols {
+			for name := range symbol_type_env {
+				if strings.Contains(name, op.Value.Value+"  ") {
+					delete(symbol_type_env, name)
+				}
+			}
+			return stack
+		}
 		if op.Type == OpTypeSaveSymbol {
 			if len(stack) < 1 {
 				not_enough_args(op.Value, op.Type, 1, 0)
 			}
 			if value, ok := symbol_type_env[op.Value.Value]; ok {
 				if !cmp_types(stack[len(stack)-1].Type, value, op.Value) {
-					parts := strings.Split(op.Value.Value, "_")
+					parts := strings.Split(op.Value.Value, " ")
 					if get_type_repr(value) == get_type_repr(stack[len(stack)-1].Type) {
 						fmt.Printf("%s:%d:%d: TYPE ERROR: Attempting to re-assign value to symbol ':%s' with a different type, symbol has type %s, while the value has type %s (different instantiation)\n", append(op.Value.Location.Get(), parts[len(parts)-1], get_type_repr(value), get_type_repr(stack[len(stack)-1].Type))...)
 						os.Exit(1)
@@ -1172,12 +1217,11 @@ func typecheck(program interface{}, stack []TypeStackEntry) []TypeStackEntry {
 			field_stack := typecheck(fields_arr, []TypeStackEntry{})
 			struct_fields, in_env := struct_type_env[name]
 			if name == "List" {
-				fields := fields_arr.(Tree).Nodes
-				new_fields := append(fields, Op{OpTypePushNil, tree.Token})
-				for i := 0; i < len(fields); i++ {
+				new_fields := []interface{}{Op{OpTypePushNil, tree.Token}}
+				for i := 0; i < len(field_stack); i++ {
 					new_fields = append(new_fields, Op{OpTypeCons, tree.Token})
 				}
-				stack = typecheck(Tree{TreeTypeExpression, new_fields, tree.Token}, stack)
+				stack = typecheck(Tree{TreeTypeExpression, new_fields, tree.Token}, append(stack, field_stack...))
 				return stack
 			}
 			if !in_env {
@@ -1211,7 +1255,7 @@ func typecheck(program interface{}, stack []TypeStackEntry) []TypeStackEntry {
 		}
 		if tree.Type == TreeTypeThen {
 			if len(stack) == 0 {
-				not_enough_args(tree.Token, tree.Type, 1, 0) // TODO: fix tree.Type
+				not_enough_args(tree.Token, tree.Type, 1, 0)
 			}
 			cond := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
@@ -1242,7 +1286,23 @@ func typecheck(program interface{}, stack []TypeStackEntry) []TypeStackEntry {
 				expected_type(cond.Token, Type{RawTypeInt, []interface{}{}}, cond.Type, TreeTypeThen, "first")
 			}
 			then_stack := typecheck(tree.Nodes[0], copy_stack_1)
-			else_stack := typecheck(tree.Nodes[1], copy_stack_2)
+			for _, elseif_branch := range tree.Nodes[0].(Tree).Nodes {
+				copy_stack_3 := make([]TypeStackEntry, len(stack))
+				copy(copy_stack_3, stack)
+				elseif_stack := typecheck(elseif_branch, copy_stack_3)
+				if len(then_stack) != len(elseif_stack) {
+					modifies_structure(tree.Token, "'elif' body")
+				}
+				for i := range len(then_stack) {
+					a := then_stack[i]
+					b := elseif_stack[i]
+					if !cmp_types(a.Type, b.Type, tree.Token) {
+						modifies_structure(b.Token, "'elif' body")
+					}
+					then_stack[i] = TypeStackEntry{instantiate_types(a.Type, b.Type), a.Token}
+				}
+			}
+			else_stack := typecheck(tree.Nodes[2], copy_stack_2)
 			if len(then_stack) != len(else_stack) {
 				modifies_structure(tree.Token, "'else' body")
 			}
@@ -1416,7 +1476,7 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 			return stack
 		}
 		is_operator := false
-		for _, operator := range []OpType{OpTypeAdd, OpTypeSub, OpTypeMul, OpTypeDiv, OpTypeLt, OpTypeGt} {
+		for _, operator := range []OpType{OpTypeAdd, OpTypeSub, OpTypeMul, OpTypeDiv, OpTypeMod, OpTypeLt, OpTypeGt} {
 			if op.Type == operator {
 				is_operator = true
 			}
@@ -1435,6 +1495,8 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 						stack = append(stack, StackEntry{b_int * a_int, op.Value})
 					} else if op.Type == OpTypeDiv {
 						stack = append(stack, StackEntry{b_int / a_int, op.Value})
+					} else if op.Type == OpTypeMod {
+						stack = append(stack, StackEntry{b_int % a_int, op.Value})
 					} else if op.Type == OpTypeLt {
 						if b_int < a_int {
 							stack = append(stack, StackEntry{1, op.Value})
@@ -1493,6 +1555,18 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 			}
 			fmt.Println(repr)
 			return stack[:len(stack)-1]
+		}
+		if op.Type == OpTypeShow {
+			if len(stack) < 1 {
+				not_enough_args(op.Value, op.Type, 1, 0)
+			}
+			entry_a := stack[len(stack)-1]
+			repr := []interface{}{}
+			for _, char := range value_repr(entry_a.Value) {
+				repr = append(repr, byte(char))
+			}
+			stack[len(stack)-1] = StackEntry{repr, op.Value}
+			return stack
 		}
 		if op.Type == OpTypeDup {
 			stack = append(stack, stack[len(stack)-1])
@@ -1601,6 +1675,9 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 			field_value := struct_fields[prop_index]
 			return append(stack, StackEntry{field_value, op.Value})
 		}
+		if op.Type == OpTypeClearMacroSymbols {
+			return stack
+		}
 	}
 	if tree, ok := program.(Tree); ok {
 		if tree.Type == TreeTypeStruct {
@@ -1612,12 +1689,11 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 			field_stack := interpret(fields_arr, []StackEntry{})
 			fields_order := struct_type_order[name]
 			if name == "List" {
-				fields := fields_arr.(Tree)
-				new_fields := append(fields.Nodes, Op{OpTypePushNil, tree.Token})
-				for range len(new_fields) - 1 {
+				new_fields := []interface{}{Op{OpTypePushNil, tree.Token}}
+				for i := 0; i < len(field_stack); i++ {
 					new_fields = append(new_fields, Op{OpTypeCons, tree.Token})
 				}
-				stack = interpret(Tree{TreeTypeExpression, new_fields, tree.Token}, stack)
+				stack = interpret(Tree{TreeTypeExpression, new_fields, tree.Token}, append(stack, field_stack...))
 				return stack
 			}
 			new_fields := []interface{}{}
@@ -1638,9 +1714,22 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 		if tree.Type == TreeTypeThen {
 			cond := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
+			elifs := tree.Nodes[1].([]interface{})
 			if cond_int, ok := cond.Value.(int); ok {
 				if cond_int == 1 {
 					stack = interpret(tree.Nodes[0], stack)
+					return stack
+				}
+				for _, elif := range elifs {
+					stack = interpret(elif.([]interface{})[0], stack)
+					cond := stack[len(stack)-1]
+					stack = stack[:len(stack)-1]
+					if cond_int, ok := cond.Value.(int); ok {
+						if cond_int != 0 {
+							stack = interpret(elif.([]interface{})[1], stack)
+							break
+						}
+					}
 				}
 			}
 			return stack
@@ -1648,11 +1737,27 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 		if tree.Type == TreeTypeThenElse {
 			cond := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
+			elifs := tree.Nodes[1].([]interface{})
 			if cond_int, ok := cond.Value.(int); ok {
-				if cond_int == 1 {
+				if cond_int != 0 {
 					stack = interpret(tree.Nodes[0], stack)
 				} else {
-					stack = interpret(tree.Nodes[1], stack)
+					elif_is_true := false
+					for _, elif := range elifs {
+						stack = interpret(elif.([]interface{})[0], stack)
+						cond := stack[len(stack)-1]
+						stack = stack[:len(stack)-1]
+						if cond_int, ok := cond.Value.(int); ok {
+							if cond_int != 0 {
+								stack = interpret(elif.([]interface{})[1], stack)
+								elif_is_true = true
+								break
+							}
+						}
+					}
+					if !elif_is_true {
+						stack = interpret(tree.Nodes[2], stack)
+					}
 				}
 			}
 			return stack

@@ -1,0 +1,15 @@
+include "std.mappable"
+
+define <$>.list
+    :fn :list
+    [] :acc
+    while list # 0 > loop
+        acc list head fn ~ [] :> ++ :acc
+        list tail :list
+    end acc
+end
+
+define !Mappable(List)
+    :list
+    list {<$>.list} @Mappable
+end

@@ -1,0 +1,29 @@
+include "std.mappable"
+
+define @Maybe
+    :box
+    struct Maybe
+        "type" String
+        "value" box
+    end
+    box [] = then
+        Maybe{"None" []}
+    else
+        Maybe{"Some" box}
+    end
+end
+
+define @Maybe:<$>
+    :fn :maybe
+    maybe "type" . "Some" = then
+        maybe "value" . head :value
+        List{value fn ~} @Maybe
+    else
+        List{} @Maybe
+    end
+end
+
+define !Mappable(Maybe)
+    :maybe
+    maybe {@Maybe:<$>} @Mappable
+end

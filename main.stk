@@ -1,10 +1,4 @@
-include "std"
+10 7 % :x
 
-struct OpType
-    "name" String
-    "value" Int
-end
+"is: " x show ++ print
 
-OpType{"push-int" iota} :op-type@push-int
-
-op-type@push-int print
