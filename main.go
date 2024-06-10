@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"math"
 	"os"
 	"regexp"
 	"strconv"
@@ -13,9 +14,11 @@ type TokenType = int
 
 const (
 	TokenTypeInt    = iota
+	TokenTypeFloat  = iota
 	TokenTypeChar   = iota
 	TokenTypeString = iota
 	TokenTypeSymbol = iota
+	TokenTypeGlobal = iota
 	TokenTypeName   = iota
 	TokenTypeStruct = iota
 	TokenTypeNil    = iota
@@ -46,6 +49,7 @@ const (
 	OpTypeCons       = iota
 	OpTypeAssert     = iota
 	OpTypePushInt    = iota
+	OpTypePushFloat  = iota
 	OpTypePushChar   = iota
 	OpTypePushNil    = iota
 	OpTypePushQuote  = iota
@@ -58,7 +62,10 @@ const (
 	OpTypeSub        = iota
 	OpTypeMul        = iota
 	OpTypeDiv        = iota
+	OpTypePow        = iota
 	OpTypeMod        = iota
+	OpTypeFloor      = iota
+	OpTypeCeil       = iota
 	OpTypeLt         = iota
 	OpTypeGt         = iota
 	OpTypeEq         = iota
@@ -71,7 +78,6 @@ const (
 	OpTypeSwap       = iota
 	OpTypeDrop       = iota
 	OpTypeOver       = iota
-	OpTypeIota       = iota
 	OpTypeLen        = iota
 	OpTypeHead       = iota
 	OpTypeTail       = iota
@@ -112,6 +118,7 @@ type RawType = int
 
 const (
 	RawTypeInt        = iota
+	RawTypeFloat      = iota
 	RawTypeChar       = iota
 	RawTypeList       = iota
 	RawTypeQuote      = iota
@@ -150,8 +157,10 @@ func lex(file string, code string) []Token {
 	array_regex, _ := regexp.Compile(`^(\[\])`)
 	char_regex, _ := regexp.Compile(`^'([^'])'`)
 	string_regex, _ := regexp.Compile(`^"([^"]*)"`)
-	num_regex, _ := regexp.Compile(`^(\d+)`)
+	int_regex, _ := regexp.Compile(`^(-?\d+)`)
+	float_regex, _ := regexp.Compile(`^(-?\d+\.\d+)`)
 	symbol_regex, _ := regexp.Compile(`^:([a-z_\-?!@]+)`)
+	global_regex, _ := regexp.Compile(`^#([a-z_\-?!@]+)`)
 	name_regex, _ := regexp.Compile(`^([^A-Z\s\d'"{}][^\s\d'"{}]*)`)
 	struct_regex, _ := regexp.Compile(`^([A-Z][a-zA-Z0-9_]*)`)
 	quote_regex, _ := regexp.Compile(`^([{}])`)
@@ -199,8 +208,16 @@ func lex(file string, code string) []Token {
 			tokens = append(tokens, tok)
 			continue
 		}
-		if num_regex.MatchString(code) {
-			num := num_regex.FindStringSubmatch(code)
+		if float_regex.MatchString(code) {
+			num := float_regex.FindStringSubmatch(code)
+			col += len(num[1])
+			code = code[len(num[1]):]
+			tok := Token{TokenTypeFloat, num[1], loc}
+			tokens = append(tokens, tok)
+			continue
+		}
+		if int_regex.MatchString(code) {
+			num := int_regex.FindStringSubmatch(code)
 			col += len(num[1])
 			code = code[len(num[1]):]
 			tok := Token{TokenTypeInt, num[1], loc}
@@ -220,6 +237,14 @@ func lex(file string, code string) []Token {
 			col += len(sym[1]) + 1
 			code = code[len(sym[1])+1:]
 			tok := Token{TokenTypeSymbol, sym[1], loc}
+			tokens = append(tokens, tok)
+			continue
+		}
+		if global_regex.MatchString(code) {
+			glob := global_regex.FindStringSubmatch(code)
+			col += len(glob[1]) + 1
+			code = code[len(glob[1])+1:]
+			tok := Token{TokenTypeGlobal, glob[1], loc}
 			tokens = append(tokens, tok)
 			continue
 		}
@@ -251,12 +276,16 @@ func lex(file string, code string) []Token {
 var (
 	macro_env      = map[string]interface{}{}
 	symbol_env     = map[string]interface{}{}
+	global_env     = map[string]interface{}{}
 	type_alias_env = map[string]interface{}{}
 )
 
 func parse_atom(tokens []Token, current_macros []string, macro_id int, eval bool) (interface{}, []Token) {
 	if tokens[0].Type == TokenTypeInt {
 		return Op{OpTypePushInt, tokens[0]}, tokens[1:]
+	}
+	if tokens[0].Type == TokenTypeFloat {
+		return Op{OpTypePushFloat, tokens[0]}, tokens[1:]
 	}
 	if tokens[0].Type == TokenTypeChar {
 		return Op{OpTypePushChar, tokens[0]}, tokens[1:]
@@ -294,6 +323,10 @@ func parse_atom(tokens []Token, current_macros []string, macro_id int, eval bool
 		symbol_env[new_tok.Value] = true
 		return Op{OpTypeSaveSymbol, new_tok}, tokens[1:]
 	}
+	if tokens[0].Type == TokenTypeGlobal {
+		global_env[tokens[0].Value] = true
+		return Op{OpTypeSaveSymbol, tokens[0]}, tokens[1:]
+	}
 	if tokens[0].Type == TokenTypeName {
 		if tokens[0].Value == "assert" {
 			return Op{OpTypeAssert, tokens[0]}, tokens[1:]
@@ -322,8 +355,17 @@ func parse_atom(tokens []Token, current_macros []string, macro_id int, eval bool
 		if tokens[0].Value == "/" {
 			return Op{OpTypeDiv, tokens[0]}, tokens[1:]
 		}
+		if tokens[0].Value == "^" {
+			return Op{OpTypePow, tokens[0]}, tokens[1:]
+		}
 		if tokens[0].Value == "%" {
 			return Op{OpTypeMod, tokens[0]}, tokens[1:]
+		}
+		if tokens[0].Value == "floor" {
+			return Op{OpTypeFloor, tokens[0]}, tokens[1:]
+		}
+		if tokens[0].Value == "ceil" {
+			return Op{OpTypeCeil, tokens[0]}, tokens[1:]
 		}
 		if tokens[0].Value == "<" {
 			return Op{OpTypeLt, tokens[0]}, tokens[1:]
@@ -357,9 +399,6 @@ func parse_atom(tokens []Token, current_macros []string, macro_id int, eval bool
 		}
 		if tokens[0].Value == "over" {
 			return Op{OpTypeOver, tokens[0]}, tokens[1:]
-		}
-		if tokens[0].Value == "iota" {
-			return Op{OpTypeIota, tokens[0]}, tokens[1:]
 		}
 		if tokens[0].Value == "#" {
 			return Op{OpTypeLen, tokens[0]}, tokens[1:]
@@ -563,6 +602,10 @@ func parse_atom(tokens []Token, current_macros []string, macro_id int, eval bool
 		if in_symbols {
 			return Op{OpTypeName, new_tok}, tokens[1:]
 		}
+		_, in_globals := global_env[tokens[0].Value]
+		if in_globals {
+			return Op{OpTypeName, tokens[0]}, tokens[1:]
+		}
 		is_keyword := false
 		for _, keyword := range []string{"then", "define", "else", "elif", "do", "end", "while", "loop", "struct"} {
 			if tokens[0].Value == keyword {
@@ -601,6 +644,8 @@ func parse_atom(tokens []Token, current_macros []string, macro_id int, eval bool
 			}
 			if struct_name.Value == "Int" {
 				return Type{RawTypeInt, []interface{}{}}, tokens[1:]
+			} else if struct_name.Value == "Float" {
+				return Type{RawTypeFloat, []interface{}{}}, tokens[1:]
 			} else if struct_name.Value == "Char" {
 				return Type{RawTypeChar, []interface{}{}}, tokens[1:]
 			} else if struct_name.Value == "String" {
@@ -665,6 +710,7 @@ func init_repr_maps() {
 	op_type_names[increase_op_type_count()] = ":>"
 	op_type_names[increase_op_type_count()] = "assert"
 	op_type_names[increase_op_type_count()] = "push int"
+	op_type_names[increase_op_type_count()] = "push float"
 	op_type_names[increase_op_type_count()] = "push char"
 	op_type_names[increase_op_type_count()] = "push nil"
 	op_type_names[increase_op_type_count()] = "push quote"
@@ -677,7 +723,10 @@ func init_repr_maps() {
 	op_type_names[increase_op_type_count()] = "-"
 	op_type_names[increase_op_type_count()] = "*"
 	op_type_names[increase_op_type_count()] = "/"
+	op_type_names[increase_op_type_count()] = "^"
 	op_type_names[increase_op_type_count()] = "%"
+	op_type_names[increase_op_type_count()] = "floor"
+	op_type_names[increase_op_type_count()] = "ceil"
 	op_type_names[increase_op_type_count()] = "<"
 	op_type_names[increase_op_type_count()] = ">"
 	op_type_names[increase_op_type_count()] = "="
@@ -690,7 +739,6 @@ func init_repr_maps() {
 	op_type_names[increase_op_type_count()] = "swap"
 	op_type_names[increase_op_type_count()] = "drop"
 	op_type_names[increase_op_type_count()] = "over"
-	op_type_names[increase_op_type_count()] = "iota"
 	op_type_names[increase_op_type_count()] = "#"
 	op_type_names[increase_op_type_count()] = "head"
 	op_type_names[increase_op_type_count()] = "tail"
@@ -699,9 +747,10 @@ func init_repr_maps() {
 	op_type_names[increase_op_type_count()] = "'type?'"
 
 	type_names[0] = "Int"
-	type_names[1] = "Char"
-	type_names[2] = "List"
-	type_names[6] = "Undefined"
+	type_names[1] = "Float"
+	type_names[2] = "Char"
+	type_names[3] = "List"
+	type_names[7] = "Undefined"
 }
 
 func get_type_repr(typ Type) string {
@@ -726,7 +775,11 @@ func get_type_repr(typ Type) string {
 		return name
 	}
 	builder.WriteString(")")
-	return builder.String()
+	str := builder.String()
+	if str == "List(Char)" {
+		return "String"
+	}
+	return str
 }
 
 func not_enough_args(token Token, op_type OpType, num_args int, got int) {
@@ -863,6 +916,9 @@ func typecheck(program interface{}, stack []TypeStackEntry) []TypeStackEntry {
 		if op.Type == OpTypePushInt {
 			return append(stack, TypeStackEntry{Type{RawTypeInt, []interface{}{}}, op.Value})
 		}
+		if op.Type == OpTypePushFloat {
+			return append(stack, TypeStackEntry{Type{RawTypeFloat, []interface{}{}}, op.Value})
+		}
 		if op.Type == OpTypePushChar {
 			return append(stack, TypeStackEntry{Type{RawTypeChar, []interface{}{op.Value.Value}}, op.Value})
 		}
@@ -911,7 +967,7 @@ func typecheck(program interface{}, stack []TypeStackEntry) []TypeStackEntry {
 			return stack
 		}
 		is_operator := false
-		for _, operator := range []OpType{OpTypeAdd, OpTypeSub, OpTypeMul, OpTypeDiv, OpTypeMod, OpTypeLt, OpTypeGt} {
+		for _, operator := range []OpType{OpTypeAdd, OpTypeSub, OpTypeMul, OpTypeDiv, OpTypeMod, OpTypeLt, OpTypeGt, OpTypePow} {
 			if op.Type == operator {
 				is_operator = true
 			}
@@ -922,15 +978,43 @@ func typecheck(program interface{}, stack []TypeStackEntry) []TypeStackEntry {
 			}
 			entry_a := stack[len(stack)-1]
 			entry_b := stack[len(stack)-2]
+			int_type_ := Type{RawTypeInt, []interface{}{}}
+			float_type_ := Type{RawTypeFloat, []interface{}{}}
 			stack = stack[:len(stack)-2]
-			if !cmp_types(entry_a.Type, Type{RawTypeInt, []interface{}{}}, op.Value) {
-				expected_type(entry_a.Token, Type{RawTypeInt, []interface{}{}}, entry_a.Type, op.Type, "second")
+			if !cmp_types(entry_a.Type, int_type_, op.Value) && !cmp_types(entry_a.Type, float_type_, op.Value) {
+				expected_type(entry_a.Token, int_type_, entry_a.Type, op.Type, "second")
 			}
-			if !cmp_types(entry_b.Type, Type{RawTypeInt, []interface{}{}}, op.Value) {
-				expected_type(entry_b.Token, Type{RawTypeInt, []interface{}{}}, entry_b.Type, op.Type, "first")
+			if !cmp_types(entry_b.Type, int_type_, op.Value) && !cmp_types(entry_b.Type, float_type_, op.Value) {
+				expected_type(entry_b.Token, int_type_, entry_b.Type, op.Type, "first")
 			}
-			stack = append(stack, TypeStackEntry{Type{RawTypeInt, []interface{}{}}, op.Value})
+			if cmp_types(entry_a.Type, int_type_, op.Value) && cmp_types(entry_b.Type, int_type_, op.Value) || op.Type == OpTypeLt || op.Type == OpTypeGt {
+				stack = append(stack, TypeStackEntry{int_type_, op.Value})
+			} else {
+				stack = append(stack, TypeStackEntry{float_type_, op.Value})
+			}
 			return stack
+		}
+		if op.Type == OpTypeFloor {
+			if len(stack) < 1 {
+				not_enough_args(op.Value, op.Type, 1, 0)
+			}
+			entry_a := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if !cmp_types(entry_a.Type, Type{RawTypeFloat, []interface{}{}}, op.Value) {
+				expected_type(entry_a.Token, Type{RawTypeFloat, []interface{}{}}, entry_a.Type, op.Type, "first")
+			}
+			return append(stack, TypeStackEntry{Type{RawTypeInt, []interface{}{}}, op.Value})
+		}
+		if op.Type == OpTypeCeil {
+			if len(stack) < 1 {
+				not_enough_args(op.Value, op.Type, 1, 0)
+			}
+			entry_a := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if !cmp_types(entry_a.Type, Type{RawTypeFloat, []interface{}{}}, op.Value) {
+				expected_type(entry_a.Token, Type{RawTypeFloat, []interface{}{}}, entry_a.Type, op.Type, "first")
+			}
+			return append(stack, TypeStackEntry{Type{RawTypeInt, []interface{}{}}, op.Value})
 		}
 		if op.Type == OpTypeEq {
 			if len(stack) < 2 {
@@ -939,10 +1023,16 @@ func typecheck(program interface{}, stack []TypeStackEntry) []TypeStackEntry {
 			entry_a := stack[len(stack)-1]
 			entry_b := stack[len(stack)-2]
 			stack = stack[:len(stack)-2]
+			int_type_ := Type{RawTypeInt, []interface{}{}}
+			float_type_ := Type{RawTypeFloat, []interface{}{}}
+			if cmp_types(entry_a.Type, int_type_, op.Value) || cmp_types(entry_a.Type, float_type_, op.Value) && cmp_types(entry_b.Type, int_type_, op.Value) || cmp_types(entry_b.Type, float_type_, op.Value) {
+				stack = append(stack, TypeStackEntry{int_type_, op.Value})
+				return stack
+			}
 			if !cmp_types(entry_a.Type, entry_b.Type, op.Value) {
 				expected_type(op.Value, entry_b.Type, entry_a.Type, op.Type, "second")
 			}
-			stack = append(stack, TypeStackEntry{Type{RawTypeInt, []interface{}{}}, op.Value})
+			stack = append(stack, TypeStackEntry{int_type_, op.Value})
 			return stack
 		}
 		if op.Type == OpTypeAnd {
@@ -952,13 +1042,15 @@ func typecheck(program interface{}, stack []TypeStackEntry) []TypeStackEntry {
 			entry_a := stack[len(stack)-1]
 			entry_b := stack[len(stack)-2]
 			stack = stack[:len(stack)-2]
-			if !cmp_types(entry_a.Type, Type{RawTypeInt, []interface{}{}}, op.Value) {
-				expected_type(entry_a.Token, Type{RawTypeInt, []interface{}{}}, entry_a.Type, op.Type, "second")
+			int_type_ := Type{RawTypeInt, []interface{}{}}
+			float_type_ := Type{RawTypeFloat, []interface{}{}}
+			if !cmp_types(entry_a.Type, int_type_, op.Value) && !cmp_types(entry_a.Type, float_type_, op.Value) {
+				expected_type(entry_a.Token, int_type_, entry_a.Type, op.Type, "second")
 			}
-			if !cmp_types(entry_b.Type, Type{RawTypeInt, []interface{}{}}, op.Value) {
-				expected_type(entry_b.Token, Type{RawTypeInt, []interface{}{}}, entry_b.Type, op.Type, "first")
+			if !cmp_types(entry_b.Type, int_type_, op.Value) && !cmp_types(entry_b.Type, float_type_, op.Value) {
+				expected_type(entry_b.Token, int_type_, entry_b.Type, op.Type, "first")
 			}
-			stack = append(stack, TypeStackEntry{Type{RawTypeInt, []interface{}{}}, op.Value})
+			stack = append(stack, TypeStackEntry{int_type_, op.Value})
 			return stack
 		}
 		if op.Type == OpTypeOr {
@@ -968,13 +1060,15 @@ func typecheck(program interface{}, stack []TypeStackEntry) []TypeStackEntry {
 			entry_a := stack[len(stack)-1]
 			entry_b := stack[len(stack)-2]
 			stack = stack[:len(stack)-2]
-			if !cmp_types(entry_a.Type, Type{RawTypeInt, []interface{}{}}, op.Value) {
-				expected_type(entry_a.Token, Type{RawTypeInt, []interface{}{}}, entry_a.Type, op.Type, "second")
+			int_type_ := Type{RawTypeInt, []interface{}{}}
+			float_type_ := Type{RawTypeFloat, []interface{}{}}
+			if !cmp_types(entry_a.Type, int_type_, op.Value) && !cmp_types(entry_a.Type, float_type_, op.Value) {
+				expected_type(entry_a.Token, int_type_, entry_a.Type, op.Type, "second")
 			}
-			if !cmp_types(entry_b.Type, Type{RawTypeInt, []interface{}{}}, op.Value) {
-				expected_type(entry_b.Token, Type{RawTypeInt, []interface{}{}}, entry_b.Type, op.Type, "first")
+			if !cmp_types(entry_b.Type, int_type_, op.Value) && !cmp_types(entry_b.Type, float_type_, op.Value) {
+				expected_type(entry_b.Token, int_type_, entry_b.Type, op.Type, "first")
 			}
-			stack = append(stack, TypeStackEntry{Type{RawTypeInt, []interface{}{}}, op.Value})
+			stack = append(stack, TypeStackEntry{int_type_, op.Value})
 			return stack
 		}
 		if op.Type == OpTypePrint {
@@ -1019,10 +1113,6 @@ func typecheck(program interface{}, stack []TypeStackEntry) []TypeStackEntry {
 			}
 			entry_b := stack[len(stack)-2]
 			stack[len(stack)] = entry_b
-			return stack
-		}
-		if op.Type == OpTypeIota {
-			stack = append(stack, TypeStackEntry{Type{RawTypeInt, []interface{}{}}, op.Value})
 			return stack
 		}
 		if op.Type == OpTypeLen {
@@ -1237,7 +1327,7 @@ func typecheck(program interface{}, stack []TypeStackEntry) []TypeStackEntry {
 			for i, field_name := range fields_order {
 				field := struct_fields[field_name]
 				if !cmp_types(field_stack[i].Type, field, tree.Token) {
-					fmt.Printf("%s:%d:%d: TYPE ERROR: Type mismatch between field %s and provided value of struct %s, expected %s, got %s\n", append(tree.Token.Location.Get(), field_name, name, get_type_repr(field), get_type_repr(field_stack[i].Type))...)
+					fmt.Printf("%s:%d:%d: TYPE ERROR: Type mismatch between field \"%s\" and provided value of struct %s, expected %s, got %s\n", append(tree.Token.Location.Get(), field_name, name, get_type_repr(field), get_type_repr(field_stack[i].Type))...)
 					os.Exit(1)
 				}
 				new_fields = append(new_fields, field_stack[i].Type)
@@ -1432,6 +1522,20 @@ func cmp_values(a interface{}, b interface{}) bool {
 				return false
 			}
 		}
+	case int:
+		switch b.(type) {
+		case int:
+			return a == b
+		case float64:
+			return float64(a.(int)) == b.(float64)
+		}
+	case float64:
+		switch b.(type) {
+		case float64:
+			return a == b
+		case int:
+			return a.(float64) == float64(b.(int))
+		}
 	default:
 		return a == b
 	}
@@ -1440,7 +1544,6 @@ func cmp_values(a interface{}, b interface{}) bool {
 
 var (
 	symbol_value_env = map[string]StackEntry{}
-	iota_counter     = 0
 )
 
 func interpret(program interface{}, stack []StackEntry) []StackEntry {
@@ -1450,6 +1553,10 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 		}
 		if op.Type == OpTypePushInt {
 			n, _ := strconv.Atoi(op.Value.Value)
+			return append(stack, StackEntry{n, op.Value})
+		}
+		if op.Type == OpTypePushFloat {
+			n, _ := strconv.ParseFloat(op.Value.Value, 64)
 			return append(stack, StackEntry{n, op.Value})
 		}
 		if op.Type == OpTypePushChar {
@@ -1476,7 +1583,7 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 			return stack
 		}
 		is_operator := false
-		for _, operator := range []OpType{OpTypeAdd, OpTypeSub, OpTypeMul, OpTypeDiv, OpTypeMod, OpTypeLt, OpTypeGt} {
+		for _, operator := range []OpType{OpTypeAdd, OpTypeSub, OpTypeMul, OpTypeDiv, OpTypeMod, OpTypeLt, OpTypeGt, OpTypePow} {
 			if op.Type == operator {
 				is_operator = true
 			}
@@ -1495,6 +1602,8 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 						stack = append(stack, StackEntry{b_int * a_int, op.Value})
 					} else if op.Type == OpTypeDiv {
 						stack = append(stack, StackEntry{b_int / a_int, op.Value})
+					} else if op.Type == OpTypePow {
+						stack = append(stack, StackEntry{math.Pow(float64(b_int), float64(a_int)), op.Value})
 					} else if op.Type == OpTypeMod {
 						stack = append(stack, StackEntry{b_int % a_int, op.Value})
 					} else if op.Type == OpTypeLt {
@@ -1511,8 +1620,101 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 						}
 					}
 				}
+				if b_float, ok := entry_b.Value.(float64); ok {
+					if op.Type == OpTypeAdd {
+						stack = append(stack, StackEntry{b_float + float64(a_int), op.Value})
+					} else if op.Type == OpTypeSub {
+						stack = append(stack, StackEntry{b_float - float64(a_int), op.Value})
+					} else if op.Type == OpTypeMul {
+						stack = append(stack, StackEntry{b_float * float64(a_int), op.Value})
+					} else if op.Type == OpTypeDiv {
+						stack = append(stack, StackEntry{b_float / float64(a_int), op.Value})
+					} else if op.Type == OpTypePow {
+						stack = append(stack, StackEntry{math.Pow(b_float, float64(a_int)), op.Value})
+					} else if op.Type == OpTypeMod {
+						stack = append(stack, StackEntry{math.Mod(b_float, float64(a_int)), op.Value})
+					} else if op.Type == OpTypeLt {
+						if b_float < float64(a_int) {
+							stack = append(stack, StackEntry{1, op.Value})
+						} else {
+							stack = append(stack, StackEntry{0, op.Value})
+						}
+					} else if op.Type == OpTypeGt {
+						if b_float > float64(a_int) {
+							stack = append(stack, StackEntry{1, op.Value})
+						} else {
+							stack = append(stack, StackEntry{0, op.Value})
+						}
+					}
+				}
+				return stack
+			}
+			if a_float, ok := entry_a.Value.(float64); ok {
+				if b_int, ok := entry_b.Value.(int); ok {
+					if op.Type == OpTypeAdd {
+						stack = append(stack, StackEntry{float64(b_int) + a_float, op.Value})
+					} else if op.Type == OpTypeSub {
+						stack = append(stack, StackEntry{float64(b_int) - a_float, op.Value})
+					} else if op.Type == OpTypeMul {
+						stack = append(stack, StackEntry{float64(b_int) * a_float, op.Value})
+					} else if op.Type == OpTypeDiv {
+						stack = append(stack, StackEntry{float64(b_int) / a_float, op.Value})
+					} else if op.Type == OpTypePow {
+						stack = append(stack, StackEntry{math.Pow(float64(b_int), a_float), op.Value})
+					} else if op.Type == OpTypeMod {
+						stack = append(stack, StackEntry{math.Mod(float64(b_int), a_float), op.Value})
+					} else if op.Type == OpTypeLt {
+						if float64(b_int) < a_float {
+							stack = append(stack, StackEntry{1, op.Value})
+						} else {
+							stack = append(stack, StackEntry{0, op.Value})
+						}
+					} else if op.Type == OpTypeGt {
+						if float64(b_int) > a_float {
+							stack = append(stack, StackEntry{1, op.Value})
+						} else {
+							stack = append(stack, StackEntry{0, op.Value})
+						}
+					}
+				} else if b_float, ok := entry_b.Value.(float64); ok {
+					if op.Type == OpTypeAdd {
+						stack = append(stack, StackEntry{b_float + a_float, op.Value})
+					} else if op.Type == OpTypeSub {
+						stack = append(stack, StackEntry{b_float - a_float, op.Value})
+					} else if op.Type == OpTypeMul {
+						stack = append(stack, StackEntry{b_float * a_float, op.Value})
+					} else if op.Type == OpTypeDiv {
+						stack = append(stack, StackEntry{b_float / a_float, op.Value})
+					} else if op.Type == OpTypePow {
+						stack = append(stack, StackEntry{math.Pow(b_float, a_float), op.Value})
+					} else if op.Type == OpTypeMod {
+						stack = append(stack, StackEntry{math.Mod(b_float, a_float), op.Value})
+					} else if op.Type == OpTypeLt {
+						if b_float < a_float {
+							stack = append(stack, StackEntry{1, op.Value})
+						} else {
+							stack = append(stack, StackEntry{0, op.Value})
+						}
+					} else if op.Type == OpTypeGt {
+						if b_float > a_float {
+							stack = append(stack, StackEntry{1, op.Value})
+						} else {
+							stack = append(stack, StackEntry{0, op.Value})
+						}
+					}
+				}
 			}
 			return stack
+		}
+		if op.Type == OpTypeFloor {
+			entry_a := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			return append(stack, StackEntry{math.Floor(entry_a.Value.(float64)), op.Value})
+		}
+		if op.Type == OpTypeCeil {
+			entry_a := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			return append(stack, StackEntry{math.Ceil(entry_a.Value.(float64)), op.Value})
 		}
 		if op.Type == OpTypeEq {
 			entry_a := stack[len(stack)-1]
@@ -1531,6 +1733,12 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 			stack = stack[:len(stack)-2]
 			if entry_a.Value.(int) != 0 && entry_b.Value.(int) != 0 {
 				stack = append(stack, StackEntry{1, op.Value})
+			} else if entry_a.Value.(float64) != 0.0 && entry_b.Value.(int) != 0 {
+				stack = append(stack, StackEntry{1, op.Value})
+			} else if entry_a.Value.(int) != 0 && entry_b.Value.(float64) != 0.0 {
+				stack = append(stack, StackEntry{1, op.Value})
+			} else if entry_a.Value.(float64) != 0.0 && entry_b.Value.(float64) != 0.0 {
+				stack = append(stack, StackEntry{1, op.Value})
 			} else {
 				stack = append(stack, StackEntry{0, op.Value})
 			}
@@ -1541,6 +1749,12 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 			entry_b := stack[len(stack)-2]
 			stack = stack[:len(stack)-2]
 			if entry_a.Value.(int) != 0 || entry_b.Value.(int) != 0 {
+				stack = append(stack, StackEntry{1, op.Value})
+			} else if entry_a.Value.(float64) != 0.0 || entry_b.Value.(int) != 0 {
+				stack = append(stack, StackEntry{1, op.Value})
+			} else if entry_a.Value.(int) != 0 || entry_b.Value.(float64) != 0.0 {
+				stack = append(stack, StackEntry{1, op.Value})
+			} else if entry_a.Value.(float64) != 0.0 || entry_b.Value.(float64) != 0.0 {
 				stack = append(stack, StackEntry{1, op.Value})
 			} else {
 				stack = append(stack, StackEntry{0, op.Value})
@@ -1585,11 +1799,6 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 		if op.Type == OpTypeOver {
 			entry_b := stack[len(stack)-2]
 			stack[len(stack)] = entry_b
-			return stack
-		}
-		if op.Type == OpTypeIota {
-			stack = append(stack, StackEntry{iota_counter, op.Value})
-			iota_counter += 1
 			return stack
 		}
 		if op.Type == OpTypeLen {

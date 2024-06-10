@@ -1,6 +1,6 @@
 include "std.mappable"
 
-define <$>.list
+define @List:<$>
     :fn :list
     [] :acc
     while list # 0 > loop

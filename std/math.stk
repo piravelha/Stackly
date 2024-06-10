@@ -1,0 +1,4 @@
+
+define sqrt
+    0.5 ^
+end

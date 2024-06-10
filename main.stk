@@ -1,4 +1,9 @@
-10 7 % :x
+include "std.math"
 
-"is: " x show ++ print
+define hypot
+    2 ^ swap
+    2 ^
+    + sqrt
+end
 
+3 4 hypot print

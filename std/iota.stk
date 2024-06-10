@@ -1,0 +1,7 @@
+
+-1 #iota-var
+
+define iota
+    iota-var 1 + #iota-var
+    iota-var
+end
