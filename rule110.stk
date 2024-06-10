@@ -1,0 +1,69 @@
+
+'*' #@X
+' ' #@O
+
+Map{
+    List{@X @X @X} @O
+    List{@X @X @O} @X
+    List{@X @O @X} @X
+    List{@X @O @O} @O
+    List{@O @X @X} @X
+    List{@O @X @O} @X
+    List{@O @O @X} @X
+    List{@O @O @O} @O
+} #rule110table
+
+define repeat
+    :amount :elem
+    [] :acc
+    while amount 0 > loop
+        elem acc :> :acc
+        amount 1 - :amount
+    end acc
+end
+
+define rule100step
+    :state
+    "" :new-state
+    state # :length
+    0 :i
+    state head :state-head
+    while i length < loop
+        i 0 = then
+            new-state rule110table List{
+                state length 1 - !!
+                state-head
+                state 1 !!
+            } . [] :> ++ :new-state
+        elif i length 1 - = do
+            new-state rule110table List{
+                state i 2 - !!
+                state i 1 - !!
+                state-head
+            } . [] :> ++ :new-state
+        else
+            new-state rule110table List{
+                state i 1 - !!
+                state i !!
+                state i 1 + !!
+            } . [] :> ++ :new-state
+        end
+        i 1 + :i
+    end
+    new-state
+end
+
+define num-steps 100 end
+
+define rule110
+    :state num-steps :steps
+    while steps 0 > loop
+        state print
+        state rule100step :state
+        steps 1 - :steps
+    end
+end
+
+; runs in ~0.205s, lua runs it in 0.042s, and python 0.082s
+@O num-steps 1 - repeat @X [] :> ++ :rule110test
+

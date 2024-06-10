@@ -3,9 +3,11 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"regexp"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 )
@@ -83,6 +85,7 @@ const (
 	OpTypeHead       = iota
 	OpTypeTail       = iota
 	OpTypeAppend     = iota
+	OpTypeIndex      = iota
 	OpTypeIn         = iota
 	OpTypeName       = iota
 	OpTypePrintType  = iota
@@ -150,6 +153,8 @@ type ValueStruct struct {
 	Values []interface{}
 }
 
+var writer = bufio.NewWriter(os.Stdout)
+
 func lex(file string, code string) []Token {
 	tokens := []Token{}
 	line := 1
@@ -159,12 +164,12 @@ func lex(file string, code string) []Token {
 	newline_regex, _ := regexp.Compile(`^(\n)`)
 	char_regex, _ := regexp.Compile(`^'([^'])'`)
 	string_regex, _ := regexp.Compile(`^"([^"]*)"`)
-	int_regex, _ := regexp.Compile(`^(-?\d+)`)
-	float_regex, _ := regexp.Compile(`^(-?\d+\.\d+)`)
-	symbol_regex, _ := regexp.Compile(`^:([a-z_\-?!@][^\s\d'"{}]*)`)
-	global_regex, _ := regexp.Compile(`^#([a-z_\-?!@][^\s\d'"{}]*)`)
-	name_regex, _ := regexp.Compile(`^([^A-Z\s\d'"{}][^\s\d'"{}]*)`)
-	struct_regex, _ := regexp.Compile(`^([A-Z][a-zA-Z0-9_]*)`)
+	int_regex, _ := regexp.Compile(`^(-?\d+)(\s|$|[{}])`)
+	float_regex, _ := regexp.Compile(`^(-?\d+\.\d+)(\s|$|[{}])`)
+	symbol_regex, _ := regexp.Compile(`^:([a-z_\-?!@][^\s'"{}]*)`)
+	global_regex, _ := regexp.Compile(`^#([a-z_\-?!@][^\s'"{}]*)`)
+	name_regex, _ := regexp.Compile(`^([^A-Z\s'"{}][^\s'"{}]*)`)
+	struct_regex, _ := regexp.Compile(`^([A-Z][^\s'"{}]*)`)
 	quote_regex, _ := regexp.Compile(`^([{}])`)
 	for code != "" {
 		if ws_regex.MatchString(code) {
@@ -342,6 +347,9 @@ func parse_atom(tokens []Token, current_macros []string, macro_id int, eval bool
 		}
 		if tokens[0].Value == "++" {
 			return Op{OpTypeAppend, tokens[0]}, tokens[1:]
+		}
+		if tokens[0].Value == "!!" {
+			return Op{OpTypeIndex, tokens[0]}, tokens[1:]
 		}
 		if tokens[0].Value == "in" {
 			return Op{OpTypeIn, tokens[0]}, tokens[1:]
@@ -962,6 +970,26 @@ func typecheck(program interface{}, stack []TypeStackEntry) []TypeStackEntry {
 			stack = append(stack, TypeStackEntry{list_type, op.Value})
 			return stack
 		}
+		if op.Type == OpTypeIndex {
+			if len(stack) < 2 {
+				not_enough_args(op.Value, op.Type, 2, len(stack))
+			}
+			entry_a := stack[len(stack)-1]
+			entry_b := stack[len(stack)-2]
+			stack = stack[:len(stack)-2]
+			if !cmp_types(entry_b.Type, Type{RawTypeList, []interface{}{Type{RawTypeUndefined, []interface{}{}}}}, op.Value) {
+				expected_type(entry_b.Token, Type{RawTypeList, []interface{}{}}, entry_b.Type, op.Type, "first")
+			}
+			if !cmp_types(entry_a.Type, Type{RawTypeInt, []interface{}{}}, op.Value) {
+				expected_type(entry_a.Token, Type{RawTypeInt, []interface{}{}}, entry_a.Type, op.Type, "second")
+			}
+			if len(entry_b.Type.Args) > 0 {
+				stack = append(stack, TypeStackEntry{entry_b.Type.Args[0].(Type), op.Value})
+			} else {
+				stack = append(stack, TypeStackEntry{Type{RawTypeUndefined, []interface{}{}}, op.Value})
+			}
+			return stack
+		}
 		if op.Type == OpTypeIn {
 			if len(stack) < 2 {
 				not_enough_args(op.Value, op.Type, 2, len(stack))
@@ -1143,7 +1171,7 @@ func typecheck(program interface{}, stack []TypeStackEntry) []TypeStackEntry {
 				not_enough_args(op.Value, op.Type, 2, len(stack))
 			}
 			entry_b := stack[len(stack)-2]
-			stack[len(stack)] = entry_b
+			stack = append(stack, entry_b)
 			return stack
 		}
 		if op.Type == OpTypeLen {
@@ -1216,8 +1244,10 @@ func typecheck(program interface{}, stack []TypeStackEntry) []TypeStackEntry {
 			if len(stack) < 1 {
 				not_enough_args(op.Value, op.Type, 1, 0)
 			}
+			sym := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
 			if value, ok := symbol_type_env[op.Value.Value]; ok {
-				if !cmp_types(stack[len(stack)-1].Type, value, op.Value) {
+				if !cmp_types(sym.Type, value, op.Value) {
 					parts := strings.Split(op.Value.Value, " ")
 					if get_type_repr(value) == get_type_repr(stack[len(stack)-1].Type) {
 						fmt.Printf("%s:%d:%d: TYPE ERROR: Attempting to re-assign value to symbol ':%s' with a different type, symbol has type %s, while the value has type %s (different instantiation)\n", append(op.Value.Location.Get(), parts[len(parts)-1], get_type_repr(value), get_type_repr(stack[len(stack)-1].Type))...)
@@ -1227,8 +1257,8 @@ func typecheck(program interface{}, stack []TypeStackEntry) []TypeStackEntry {
 					os.Exit(1)
 				}
 			}
-			symbol_type_env[op.Value.Value] = stack[len(stack)-1].Type
-			return stack[:len(stack)-1]
+			symbol_type_env[op.Value.Value] = sym.Type
+			return stack
 		}
 		if op.Type == OpTypeAssert {
 			if len(stack) < 2 {
@@ -1251,6 +1281,7 @@ func typecheck(program interface{}, stack []TypeStackEntry) []TypeStackEntry {
 			}
 			entry_a := stack[len(stack)-1]
 			entry_b := stack[len(stack)-2]
+			stack = stack[:len(stack)-2]
 			if !cmp_types(entry_a.Type, Type{RawTypeList, []interface{}{}}, op.Value) {
 				expected_type(entry_a.Token, Type{RawTypeList, []interface{}{}}, entry_a.Type, OpTypeCons, "second (tail)")
 			}
@@ -1259,7 +1290,6 @@ func typecheck(program interface{}, stack []TypeStackEntry) []TypeStackEntry {
 					expected_type(entry_b.Token, entry_a.Type.Args[0].(Type), entry_b.Type, OpTypeCons, "first (head)")
 				}
 			}
-			stack = stack[:len(stack)-2]
 			if entry_b.Type.Type == RawTypeChar {
 				if len(entry_a.Type.Args) == 2 {
 					stack = append(stack, TypeStackEntry{Type{entry_a.Type.Type, []interface{}{entry_b.Type, append([]string{entry_b.Type.Args[0].(string)}, entry_a.Type.Args[1].([]string)...)}}, op.Value})
@@ -1642,7 +1672,7 @@ var (
 	symbol_value_env = map[string]StackEntry{}
 )
 
-func interpret(program interface{}, stack []StackEntry) []StackEntry {
+func simulate(program interface{}, stack []StackEntry) []StackEntry {
 	if op, ok := program.(Op); ok {
 		if op.Type == OpTypeNoOp {
 			return stack
@@ -1669,7 +1699,7 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 		if op.Type == OpTypeName {
 			symbol_value, in_symbols := symbol_value_env[op.Value.Value]
 			if in_symbols {
-				stack = append(stack, StackEntry{symbol_value.Value, op.Value})
+				stack = append(stack, symbol_value)
 				return stack
 			}
 			fmt.Printf("%s:%d:%d: TYPE ERROR: Unknown symbol: %s\n", append(op.Value.Location.Get(), op.Value)...)
@@ -1679,7 +1709,7 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 			quote_entry := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
 			body := quote_entry.Value
-			stack := interpret(body, stack)
+			stack := simulate(body, stack)
 			return stack
 		}
 		is_operator := false
@@ -1867,7 +1897,7 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 			if repr[0] == '"' && repr[len(repr)-1] == '"' {
 				repr = repr[1 : len(repr)-1]
 			}
-			fmt.Println(repr)
+			fmt.Fprintf(writer, repr+"\n")
 			return stack[:len(stack)-1]
 		}
 		if op.Type == OpTypeShow {
@@ -1898,13 +1928,15 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 		}
 		if op.Type == OpTypeOver {
 			entry_b := stack[len(stack)-2]
-			stack[len(stack)] = entry_b
+			stack = append(stack, entry_b)
 			return stack
 		}
 		if op.Type == OpTypeLen {
 			entry_a := stack[len(stack)-1]
 			if a_arr, ok := entry_a.Value.([]interface{}); ok {
 				stack[len(stack)-1] = StackEntry{len(a_arr), op.Value}
+			} else {
+				stack[len(stack)-1] = StackEntry{len(entry_a.Value.(string)), op.Value}
 			}
 			return stack
 		}
@@ -1916,6 +1948,8 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 					os.Exit(1)
 				}
 				stack[len(stack)-1] = StackEntry{a_arr[0], op.Value}
+			} else {
+				stack[len(stack)-1] = StackEntry{entry_a.Value.(string)[0], op.Value}
 			}
 			return stack
 		}
@@ -1923,6 +1957,8 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 			entry_a := stack[len(stack)-1]
 			if a_arr, ok := entry_a.Value.([]interface{}); ok {
 				stack[len(stack)-1] = StackEntry{a_arr[1:], op.Value}
+			} else {
+				stack[len(stack)-1] = StackEntry{entry_a.Value.(string)[1:], op.Value}
 			}
 			return stack
 		}
@@ -1936,7 +1972,39 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 			if a_arr, ok := entry_a.Value.([]interface{}); ok {
 				if b_arr, ok := entry_b.Value.([]interface{}); ok {
 					stack = append(stack, StackEntry{append(b_arr, a_arr...), op.Value})
+				} else {
+					stack = append(stack, StackEntry{entry_b.Value, op.Value})
 				}
+			}
+			if a_str, ok := entry_a.Value.(string); ok {
+				if b_str, ok := entry_b.Value.(string); ok {
+					stack = append(stack, StackEntry{b_str + a_str, op.Value})
+				} else {
+					stack = append(stack, StackEntry{a_str, op.Value})
+				}
+			}
+			return stack
+		}
+		if op.Type == OpTypeIndex {
+			entry_a := stack[len(stack)-1]
+			entry_b := stack[len(stack)-2]
+			stack = stack[:len(stack)-2]
+			if b_arr, ok := entry_b.Value.([]interface{}); ok {
+				if a_int, ok := entry_a.Value.(int); ok {
+					if a_int > len(b_arr)-1 || a_int < 0 {
+						fmt.Printf("%s:%d:%d: ERROR: Index %d out of bounds of list %s\n", append(op.Value.Location.Get(), a_int, value_repr(b_arr))...)
+						os.Exit(1)
+					}
+					stack = append(stack, StackEntry{b_arr[a_int], op.Value})
+				}
+			}
+			if b_str, ok := entry_b.Value.(string); ok {
+				a_int := entry_a.Value.(int)
+				if a_int > len(b_str)-1 || a_int < 0 {
+					fmt.Printf("%s:%d:%d: ERROR: Index %d out of bounds of list %s\n", append(op.Value.Location.Get(), a_int, value_repr(b_str))...)
+					os.Exit(1)
+				}
+				stack = append(stack, StackEntry{b_str[a_int], op.Value})
 			}
 			return stack
 		}
@@ -1988,8 +2056,16 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 			entry_a := stack[len(stack)-1]
 			entry_b := stack[len(stack)-2]
 			stack = stack[:len(stack)-2]
-			if a_arr, ok := entry_a.Value.([]interface{}); ok {
-				stack = append(stack, StackEntry{append([]interface{}{entry_b.Value}, a_arr...), op.Value})
+			if b_char, ok := entry_b.Value.(byte); ok {
+				if _, ok := entry_a.Value.([]interface{}); ok {
+					stack = append(stack, StackEntry{string(b_char), op.Value})
+				} else {
+					stack = append(stack, StackEntry{string(b_char) + entry_a.Value.(string), op.Value})
+				}
+			} else {
+				if a_arr, ok := entry_a.Value.([]interface{}); ok {
+					stack = append(stack, StackEntry{append([]interface{}{entry_b.Value}, a_arr...), op.Value})
+				}
 			}
 			return stack
 		}
@@ -2015,6 +2091,7 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 		if op.Type == OpTypeProp {
 			entry_prop := stack[len(stack)-1]
 			entry_struct := stack[len(stack)-2]
+			stack = stack[:len(stack)-2]
 			if map_val, ok := entry_struct.Value.(map[interface{}]interface{}); ok {
 				if list_val, ok := entry_prop.Value.([]interface{}); ok {
 					repr := value_repr(list_val)
@@ -2034,7 +2111,6 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 				}
 				return append(stack, StackEntry{value, op.Value})
 			}
-			stack = stack[:len(stack)-2]
 			struct_fields := entry_struct.Value.(ValueStruct).Values
 			prop_name := entry_prop.Value.([]interface{})
 			byte_array := []byte{}
@@ -2063,14 +2139,14 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 		if tree.Type == TreeTypeNewStruct {
 			name := tree.Token.Value
 			fields_arr := tree.Nodes[0]
-			field_stack := interpret(fields_arr, []StackEntry{})
+			field_stack := simulate(fields_arr, []StackEntry{})
 			fields_order := struct_type_order[name]
 			if name == "List" {
 				new_fields := []interface{}{Op{OpTypePushNil, tree.Token}}
 				for i := 0; i < len(field_stack); i++ {
 					new_fields = append(new_fields, Op{OpTypeCons, tree.Token})
 				}
-				stack = interpret(Tree{TreeTypeExpression, new_fields, tree.Token}, append(stack, field_stack...))
+				stack = simulate(Tree{TreeTypeExpression, new_fields, tree.Token}, append(stack, field_stack...))
 				return stack
 			}
 			if name == "Map" {
@@ -2078,7 +2154,7 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 				for i := 0; i < len(field_stack)/2; i++ {
 					new_fields = append(new_fields, Op{OpTypeMapCons, tree.Token})
 				}
-				stack = interpret(Tree{TreeTypeExpression, new_fields, tree.Token}, append(stack, field_stack...))
+				stack = simulate(Tree{TreeTypeExpression, new_fields, tree.Token}, append(stack, field_stack...))
 				return stack
 			}
 			new_fields := []interface{}{}
@@ -2092,7 +2168,7 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 		}
 		if tree.Type == TreeTypeExpression {
 			for _, tr := range tree.Nodes {
-				stack = interpret(tr, stack)
+				stack = simulate(tr, stack)
 			}
 			return stack
 		}
@@ -2102,16 +2178,16 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 			elifs := tree.Nodes[1].([]interface{})
 			if cond_int, ok := cond.Value.(int); ok {
 				if cond_int == 1 {
-					stack = interpret(tree.Nodes[0], stack)
+					stack = simulate(tree.Nodes[0], stack)
 					return stack
 				}
 				for _, elif := range elifs {
-					stack = interpret(elif.([]interface{})[0], stack)
+					stack = simulate(elif.([]interface{})[0], stack)
 					cond := stack[len(stack)-1]
 					stack = stack[:len(stack)-1]
 					if cond_int, ok := cond.Value.(int); ok {
 						if cond_int != 0 {
-							stack = interpret(elif.([]interface{})[1], stack)
+							stack = simulate(elif.([]interface{})[1], stack)
 							break
 						}
 					}
@@ -2125,23 +2201,23 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 			elifs := tree.Nodes[1].([]interface{})
 			if cond_int, ok := cond.Value.(int); ok {
 				if cond_int != 0 {
-					stack = interpret(tree.Nodes[0], stack)
+					stack = simulate(tree.Nodes[0], stack)
 				} else {
 					elif_is_true := false
 					for _, elif := range elifs {
-						stack = interpret(elif.([]interface{})[0], stack)
+						stack = simulate(elif.([]interface{})[0], stack)
 						cond := stack[len(stack)-1]
 						stack = stack[:len(stack)-1]
 						if cond_int, ok := cond.Value.(int); ok {
 							if cond_int != 0 {
-								stack = interpret(elif.([]interface{})[1], stack)
+								stack = simulate(elif.([]interface{})[1], stack)
 								elif_is_true = true
 								break
 							}
 						}
 					}
 					if !elif_is_true {
-						stack = interpret(tree.Nodes[2], stack)
+						stack = simulate(tree.Nodes[2], stack)
 					}
 				}
 			}
@@ -2149,16 +2225,15 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 		}
 		if tree.Type == TreeTypeWhile {
 			cond := tree.Nodes[0]
+			body := tree.Nodes[1]
 			for {
-				stack = interpret(cond, stack)
+				stack = simulate(cond, stack)
 				result := stack[len(stack)-1]
 				stack = stack[:len(stack)-1]
-				if cond_int, ok := result.Value.(int); ok {
-					if cond_int == 1 {
-						stack = interpret(tree.Nodes[1], stack)
-					} else {
-						break
-					}
+				if cond_int, ok := result.Value.(int); ok && cond_int == 1 {
+					stack = simulate(body, stack)
+				} else {
+					break
 				}
 			}
 			return stack
@@ -2167,7 +2242,18 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 	return stack
 }
 
+var debug bool = false
+
 func main() {
+	if debug {
+		f, err := os.Create("cpu.prof")
+		if err != nil {
+			log.Fatal(err)
+		}
+		pprof.StartCPUProfile(f)
+		defer pprof.StopCPUProfile()
+	}
+
 	file, err := os.Open("main.stk")
 	if err != nil {
 		fmt.Println("Error opening file:", err)
@@ -2193,5 +2279,6 @@ func main() {
 		fmt.Printf("%s:%d:%d: TYPE ERROR: Unhandled data on the stack\n", type_stack[len(type_stack)-1].Token.Location.Get()...)
 		os.Exit(1)
 	}
-	interpret(tree, []StackEntry{})
+	simulate(tree, []StackEntry{})
+	writer.Flush()
 }

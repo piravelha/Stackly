@@ -1,10 +1,4 @@
 
+include "rule110"
 
-
-Map{"a" 1 "b" 2 "c" 3} :map
-
-map "d" in then
-    map "d" . print
-else
-    "Key 'd' not found in map " map show ++ print
-end
+rule110test rule110
