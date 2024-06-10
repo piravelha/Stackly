@@ -159,8 +159,8 @@ func lex(file string, code string) []Token {
 	string_regex, _ := regexp.Compile(`^"([^"]*)"`)
 	int_regex, _ := regexp.Compile(`^(-?\d+)`)
 	float_regex, _ := regexp.Compile(`^(-?\d+\.\d+)`)
-	symbol_regex, _ := regexp.Compile(`^:([a-z_\-?!@]+)`)
-	global_regex, _ := regexp.Compile(`^#([a-z_\-?!@]+)`)
+	symbol_regex, _ := regexp.Compile(`^:([^A-Z\s\d'"{}][^\s\d'"{}]*)`)
+	global_regex, _ := regexp.Compile(`^#([^A-Z\s\d'"{}][^\s\d'"{}]*)`)
 	name_regex, _ := regexp.Compile(`^([^A-Z\s\d'"{}][^\s\d'"{}]*)`)
 	struct_regex, _ := regexp.Compile(`^([A-Z][a-zA-Z0-9_]*)`)
 	quote_regex, _ := regexp.Compile(`^([{}])`)
@@ -963,7 +963,15 @@ func typecheck(program interface{}, stack []TypeStackEntry) []TypeStackEntry {
 				expected_type(quote_entry.Token, Type{RawTypeQuote, []interface{}{}}, quote_entry.Type, op.Type, "first")
 			}
 			body := quote_entry.Type.Args[0]
+      old_env := map[string]Type{}
+      for sym, typ := range symbol_type_env {
+        old_env[sym] = typ
+      }
+      for sym, typ := range quote_entry.Type.Args[1].(map[string]Type) {
+        symbol_type_env[sym] = typ
+      }
 			stack := typecheck(body, stack)
+      symbol_type_env = old_env
 			return stack
 		}
 		is_operator := false
@@ -1335,7 +1343,11 @@ func typecheck(program interface{}, stack []TypeStackEntry) []TypeStackEntry {
 			return append(stack, TypeStackEntry{Type{RawTypeStruct, []interface{}{name, new_fields}}, tree.Token})
 		}
 		if tree.Type == TreeTypeQuote {
-			return append(stack, TypeStackEntry{Type{RawTypeQuote, []interface{}{tree.Nodes[0]}}, tree.Token})
+      new_env := map[string]Type{}
+      for sym, typ := range symbol_type_env {
+        new_env[sym] = typ
+      }
+			return append(stack, TypeStackEntry{Type{RawTypeQuote, []interface{}{tree.Nodes[0], new_env}}, tree.Token})
 		}
 		if tree.Type == TreeTypeExpression {
 			for _, tr := range tree.Nodes {

@@ -1,9 +1,32 @@
-include "std.math"
+include "std.iota"
 
-define hypot
-    2 ^ swap
-    2 ^
-    + sqrt
+struct UnionKind
+  "name" String
+  "value" Int
 end
 
-3 4 hypot print
+UnionKind{"Undefined" iota}
+#+UnionKind.Undefined
+UnionKind{"Int" iota}
+#+UnionKind.Int
+UnionKind{"Char" iota}
+#+UnionKind.Char
+
+struct Union
+  "kind" UnionKind
+  "int" []Int
+  "char" []Char
+end
+
+define @Union
+  :kind :value
+  kind +UnionKind.Int = then
+    Union{+UnionKind.Int List{value} []}
+  elif kind +UnionKind.Char do
+    Union{+UnionKind.Char [] List{value}}
+  else
+    Union{+UnionKind.Undefined [] []}
+  end
+end
+
+10 +UnionKind.Int @Union print
