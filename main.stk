@@ -1,32 +1,10 @@
-include "std.iota"
 
-struct UnionKind
-  "name" String
-  "value" Int
+
+
+Map{"a" 1 "b" 2 "c" 3} :map
+
+map "d" in then
+    map "d" . print
+else
+    "Key 'd' not found in map " map show ++ print
 end
-
-UnionKind{"Undefined" iota}
-#+UnionKind.Undefined
-UnionKind{"Int" iota}
-#+UnionKind.Int
-UnionKind{"Char" iota}
-#+UnionKind.Char
-
-struct Union
-  "kind" UnionKind
-  "int" []Int
-  "char" []Char
-end
-
-define @Union
-  :kind :value
-  kind +UnionKind.Int = then
-    Union{+UnionKind.Int List{value} []}
-  elif kind +UnionKind.Char do
-    Union{+UnionKind.Char [] List{value}}
-  else
-    Union{+UnionKind.Undefined [] []}
-  end
-end
-
-10 +UnionKind.Int @Union print

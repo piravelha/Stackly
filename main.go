@@ -21,7 +21,6 @@ const (
 	TokenTypeGlobal = iota
 	TokenTypeName   = iota
 	TokenTypeStruct = iota
-	TokenTypeNil    = iota
 	TokenTypeQuote  = iota
 )
 
@@ -47,11 +46,13 @@ const (
 	OpTypeNoOp       = iota
 	OpTypeInclude    = iota
 	OpTypeCons       = iota
+	OpTypeMapCons    = iota
 	OpTypeAssert     = iota
 	OpTypePushInt    = iota
 	OpTypePushFloat  = iota
 	OpTypePushChar   = iota
 	OpTypePushNil    = iota
+	OpTypePushNilMap = iota
 	OpTypePushQuote  = iota
 	OpTypeSplice     = iota
 	OpTypeSaveSymbol = iota
@@ -82,6 +83,7 @@ const (
 	OpTypeHead       = iota
 	OpTypeTail       = iota
 	OpTypeAppend     = iota
+	OpTypeIn         = iota
 	OpTypeName       = iota
 	OpTypePrintType  = iota
 	OpTypePrintStack = iota
@@ -121,6 +123,7 @@ const (
 	RawTypeFloat      = iota
 	RawTypeChar       = iota
 	RawTypeList       = iota
+	RawTypeMap        = iota
 	RawTypeQuote      = iota
 	RawTypeStruct     = iota
 	RawTypeSymbolType = iota
@@ -154,13 +157,12 @@ func lex(file string, code string) []Token {
 	ws_regex, _ := regexp.Compile(`^([ \t()]+)`)
 	comment_regex, _ := regexp.Compile(`^(;.*)`)
 	newline_regex, _ := regexp.Compile(`^(\n)`)
-	array_regex, _ := regexp.Compile(`^(\[\])`)
 	char_regex, _ := regexp.Compile(`^'([^'])'`)
 	string_regex, _ := regexp.Compile(`^"([^"]*)"`)
 	int_regex, _ := regexp.Compile(`^(-?\d+)`)
 	float_regex, _ := regexp.Compile(`^(-?\d+\.\d+)`)
-	symbol_regex, _ := regexp.Compile(`^:([^A-Z\s\d'"{}][^\s\d'"{}]*)`)
-	global_regex, _ := regexp.Compile(`^#([^A-Z\s\d'"{}][^\s\d'"{}]*)`)
+	symbol_regex, _ := regexp.Compile(`^:([a-z_\-?!@][^\s\d'"{}]*)`)
+	global_regex, _ := regexp.Compile(`^#([a-z_\-?!@][^\s\d'"{}]*)`)
 	name_regex, _ := regexp.Compile(`^([^A-Z\s\d'"{}][^\s\d'"{}]*)`)
 	struct_regex, _ := regexp.Compile(`^([A-Z][a-zA-Z0-9_]*)`)
 	quote_regex, _ := regexp.Compile(`^([{}])`)
@@ -184,14 +186,6 @@ func lex(file string, code string) []Token {
 			continue
 		}
 		loc := Location{file, line, col}
-		if array_regex.MatchString(code) {
-			arr := array_regex.FindStringSubmatch(code)
-			col += len(arr[1])
-			code = code[len(arr[1]):]
-			tok := Token{TokenTypeNil, arr[1], loc}
-			tokens = append(tokens, tok)
-			continue
-		}
 		if char_regex.MatchString(code) {
 			char := char_regex.FindStringSubmatch(code)
 			col += len(char[1]) + 2
@@ -295,20 +289,11 @@ func parse_atom(tokens []Token, current_macros []string, macro_id int, eval bool
 		for _, elem := range tokens[0].Value {
 			chars = append(chars, Token{TokenTypeChar, string(elem), tokens[0].Location})
 		}
-		chars = append(chars, Token{TokenTypeNil, "[]", tokens[0].Location})
+		chars = append(chars, Token{TokenTypeName, "[]", tokens[0].Location})
 		for range tokens[0].Value {
 			chars = append(chars, Token{TokenTypeName, ":>", tokens[0].Location})
 		}
 		return parse(append(chars, tokens[1:]...), current_macros, macro_id, eval)
-	}
-	if tokens[0].Type == TokenTypeNil {
-		if len(tokens) > 1 {
-			elem, tokens := parse_atom(tokens[1:], current_macros, macro_id, eval)
-			if elem_type, ok := elem.(Type); ok {
-				return Type{RawTypeList, []interface{}{elem_type}}, tokens
-			}
-		}
-		return Op{OpTypePushNil, tokens[0]}, tokens[1:]
 	}
 	if tokens[0].Type == TokenTypeSymbol {
 		new_value := tokens[0].Value
@@ -328,11 +313,26 @@ func parse_atom(tokens []Token, current_macros []string, macro_id int, eval bool
 		return Op{OpTypeSaveSymbol, tokens[0]}, tokens[1:]
 	}
 	if tokens[0].Type == TokenTypeName {
+		if tokens[0].Value == "[]" {
+			if len(tokens) > 1 {
+				elem, tokens := parse_atom(tokens[1:], current_macros, macro_id, eval)
+				if elem_type, ok := elem.(Type); ok {
+					return Type{RawTypeList, []interface{}{elem_type}}, tokens
+				}
+			}
+			return Op{OpTypePushNil, tokens[0]}, tokens[1:]
+		}
+		if tokens[0].Value == "#[]" {
+			return Op{OpTypePushNilMap, tokens[0]}, tokens[1:]
+		}
 		if tokens[0].Value == "assert" {
 			return Op{OpTypeAssert, tokens[0]}, tokens[1:]
 		}
 		if tokens[0].Value == ":>" {
 			return Op{OpTypeCons, tokens[0]}, tokens[1:]
+		}
+		if tokens[0].Value == "#>" {
+			return Op{OpTypeMapCons, tokens[0]}, tokens[1:]
 		}
 		if tokens[0].Value == "." {
 			return Op{OpTypeProp, tokens[0]}, tokens[1:]
@@ -342,6 +342,9 @@ func parse_atom(tokens []Token, current_macros []string, macro_id int, eval bool
 		}
 		if tokens[0].Value == "++" {
 			return Op{OpTypeAppend, tokens[0]}, tokens[1:]
+		}
+		if tokens[0].Value == "in" {
+			return Op{OpTypeIn, tokens[0]}, tokens[1:]
 		}
 		if tokens[0].Value == "+" {
 			return Op{OpTypeAdd, tokens[0]}, tokens[1:]
@@ -708,11 +711,13 @@ func init_repr_maps() {
 	op_type_names[increase_op_type_count()] = "noop"
 	op_type_names[increase_op_type_count()] = "include"
 	op_type_names[increase_op_type_count()] = ":>"
+	op_type_names[increase_op_type_count()] = "#>"
 	op_type_names[increase_op_type_count()] = "assert"
 	op_type_names[increase_op_type_count()] = "push int"
 	op_type_names[increase_op_type_count()] = "push float"
 	op_type_names[increase_op_type_count()] = "push char"
 	op_type_names[increase_op_type_count()] = "push nil"
+	op_type_names[increase_op_type_count()] = "#[]"
 	op_type_names[increase_op_type_count()] = "push quote"
 	op_type_names[increase_op_type_count()] = "~"
 	op_type_names[increase_op_type_count()] = "save symbol"
@@ -750,6 +755,7 @@ func init_repr_maps() {
 	type_names[1] = "Float"
 	type_names[2] = "Char"
 	type_names[3] = "List"
+	type_names[4] = "Map"
 	type_names[7] = "Undefined"
 }
 
@@ -926,6 +932,10 @@ func typecheck(program interface{}, stack []TypeStackEntry) []TypeStackEntry {
 			stack = append(stack, TypeStackEntry{Type{RawTypeList, []interface{}{Type{RawTypeUndefined, []interface{}{}}}}, op.Value})
 			return stack
 		}
+		if op.Type == OpTypePushNilMap {
+			stack = append(stack, TypeStackEntry{Type{RawTypeMap, []interface{}{Type{RawTypeUndefined, []interface{}{}}, Type{RawTypeUndefined, []interface{}{}}}}, op.Value})
+			return stack
+		}
 		if op.Type == OpTypeName {
 			symbol_value, in_symbols := symbol_type_env[op.Value.Value]
 			if in_symbols {
@@ -952,6 +962,19 @@ func typecheck(program interface{}, stack []TypeStackEntry) []TypeStackEntry {
 			stack = append(stack, TypeStackEntry{list_type, op.Value})
 			return stack
 		}
+		if op.Type == OpTypeIn {
+			if len(stack) < 2 {
+				not_enough_args(op.Value, op.Type, 2, len(stack))
+			}
+			entry_key := stack[len(stack)-1]
+			entry_map := stack[len(stack)-2]
+			stack = stack[:len(stack)-2]
+			if !cmp_types(entry_map.Type, Type{RawTypeMap, []interface{}{entry_key.Type, Type{RawTypeUndefined, []interface{}{}}}}, op.Value) {
+				expected_type(entry_map.Token, Type{RawTypeMap, []interface{}{entry_key.Type, Type{RawTypeUndefined, []interface{}{}}}}, entry_map.Type, op.Type, "first")
+			}
+			stack = append(stack, TypeStackEntry{Type{RawTypeInt, []interface{}{}}, op.Value})
+			return stack
+		}
 		if op.Type == OpTypeSplice {
 			if len(stack) < 1 {
 				not_enough_args(op.Value, op.Type, 1, 0)
@@ -963,15 +986,15 @@ func typecheck(program interface{}, stack []TypeStackEntry) []TypeStackEntry {
 				expected_type(quote_entry.Token, Type{RawTypeQuote, []interface{}{}}, quote_entry.Type, op.Type, "first")
 			}
 			body := quote_entry.Type.Args[0]
-      old_env := map[string]Type{}
-      for sym, typ := range symbol_type_env {
-        old_env[sym] = typ
-      }
-      for sym, typ := range quote_entry.Type.Args[1].(map[string]Type) {
-        symbol_type_env[sym] = typ
-      }
+			old_env := map[string]Type{}
+			for sym, typ := range symbol_type_env {
+				old_env[sym] = typ
+			}
+			for sym, typ := range quote_entry.Type.Args[1].(map[string]Type) {
+				symbol_type_env[sym] = typ
+			}
 			stack := typecheck(body, stack)
-      symbol_type_env = old_env
+			symbol_type_env = old_env
 			return stack
 		}
 		is_operator := false
@@ -1248,6 +1271,34 @@ func typecheck(program interface{}, stack []TypeStackEntry) []TypeStackEntry {
 			}
 			return stack
 		}
+		if op.Type == OpTypeMapCons {
+			if len(stack) < 3 {
+				not_enough_args(op.Value, op.Type, 3, len(stack))
+			}
+			entry_map := stack[len(stack)-1]
+			entry_value := stack[len(stack)-2]
+			entry_key := stack[len(stack)-3]
+			int_type := Type{RawTypeInt, []interface{}{}}
+			float_type := Type{RawTypeFloat, []interface{}{}}
+			string_type := Type{RawTypeList, []interface{}{Type{RawTypeChar, []interface{}{}}}}
+			if !cmp_types(entry_key.Type, int_type, op.Value) && !cmp_types(entry_key.Type, float_type, op.Value) && !cmp_types(entry_key.Type, string_type, op.Value) {
+				fmt.Printf("%s:%d:%d: TYPE ERROR: Unhashable type: %s\n", append(op.Value.Location.Get(), get_type_repr(entry_key.Type))...)
+			}
+			stack = stack[:len(stack)-3]
+			if !cmp_types(entry_map.Type, Type{RawTypeMap, []interface{}{}}, op.Value) {
+				expected_type(entry_map.Token, Type{RawTypeMap, []interface{}{}}, entry_map.Type, OpTypeCons, "first (map)")
+			}
+			if len(entry_map.Type.Args) == 2 {
+				if !cmp_types(entry_map.Type.Args[0].(Type), entry_key.Type, op.Value) {
+					expected_type(entry_key.Token, entry_map.Type.Args[0].(Type), entry_key.Type, OpTypeCons, "second (key)")
+				}
+				if !cmp_types(entry_map.Type.Args[1].(Type), entry_value.Type, op.Value) {
+					expected_type(entry_value.Token, entry_map.Type.Args[1].(Type), entry_value.Type, OpTypeCons, "third (value)")
+				}
+			}
+			stack = append(stack, TypeStackEntry{Type{entry_map.Type.Type, []interface{}{entry_key.Type, entry_value.Type}}, op.Value})
+			return stack
+		}
 		if op.Type == OpTypeProp {
 			if len(stack) < 2 {
 				not_enough_args(op.Value, op.Type, 2, len(stack))
@@ -1255,7 +1306,13 @@ func typecheck(program interface{}, stack []TypeStackEntry) []TypeStackEntry {
 			entry_prop := stack[len(stack)-1]
 			entry_struct := stack[len(stack)-2]
 			stack = stack[:len(stack)-2]
-			if !cmp_types(entry_prop.Type, Type{RawTypeList, []interface{}{}}, op.Value) {
+			if cmp_types(entry_struct.Type, Type{RawTypeMap, []interface{}{}}, op.Value) {
+				if !cmp_types(entry_prop.Type, entry_struct.Type.Args[0].(Type), op.Value) {
+					expected_type(entry_prop.Token, Type{RawTypeMap, []interface{}{}}, entry_prop.Type, op.Type, "second")
+				}
+				return append(stack, TypeStackEntry{entry_struct.Type.Args[1].(Type), op.Value})
+			}
+			if !cmp_types(entry_prop.Type, Type{RawTypeList, []interface{}{Type{RawTypeChar, []interface{}{}}}}, op.Value) {
 				expected_type(entry_prop.Token, Type{RawTypeList, []interface{}{Type{RawTypeChar, []interface{}{}}}}, entry_prop.Type, op.Type, "second")
 			}
 			if prop_elem_type, ok := entry_prop.Type.Args[0].(Type); ok {
@@ -1322,6 +1379,14 @@ func typecheck(program interface{}, stack []TypeStackEntry) []TypeStackEntry {
 				stack = typecheck(Tree{TreeTypeExpression, new_fields, tree.Token}, append(stack, field_stack...))
 				return stack
 			}
+			if name == "Map" {
+				new_fields := []interface{}{Op{OpTypePushNilMap, tree.Token}}
+				for i := 0; i < len(field_stack)/2; i++ {
+					new_fields = append(new_fields, Op{OpTypeMapCons, tree.Token})
+				}
+				stack = typecheck(Tree{TreeTypeExpression, new_fields, tree.Token}, append(stack, field_stack...))
+				return stack
+			}
 			if !in_env {
 				fmt.Printf("%s:%d:%d: TYPE ERROR: Unknown struct name: %s\n", append(tree.Token.Location.Get(), name)...)
 				os.Exit(1)
@@ -1343,10 +1408,10 @@ func typecheck(program interface{}, stack []TypeStackEntry) []TypeStackEntry {
 			return append(stack, TypeStackEntry{Type{RawTypeStruct, []interface{}{name, new_fields}}, tree.Token})
 		}
 		if tree.Type == TreeTypeQuote {
-      new_env := map[string]Type{}
-      for sym, typ := range symbol_type_env {
-        new_env[sym] = typ
-      }
+			new_env := map[string]Type{}
+			for sym, typ := range symbol_type_env {
+				new_env[sym] = typ
+			}
 			return append(stack, TypeStackEntry{Type{RawTypeQuote, []interface{}{tree.Nodes[0], new_env}}, tree.Token})
 		}
 		if tree.Type == TreeTypeExpression {
@@ -1388,10 +1453,10 @@ func typecheck(program interface{}, stack []TypeStackEntry) []TypeStackEntry {
 				expected_type(cond.Token, Type{RawTypeInt, []interface{}{}}, cond.Type, TreeTypeThen, "first")
 			}
 			then_stack := typecheck(tree.Nodes[0], copy_stack_1)
-			for _, elseif_branch := range tree.Nodes[0].(Tree).Nodes {
+			for _, elseif_branch := range tree.Nodes[1].([]interface{}) {
 				copy_stack_3 := make([]TypeStackEntry, len(stack))
 				copy(copy_stack_3, stack)
-				elseif_stack := typecheck(elseif_branch, copy_stack_3)
+				elseif_stack := typecheck(elseif_branch.([]interface{})[1], copy_stack_3)
 				if len(then_stack) != len(elseif_stack) {
 					modifies_structure(tree.Token, "'elif' body")
 				}
@@ -1491,12 +1556,31 @@ func value_repr(value interface{}) string {
 		builder.WriteString("}")
 		return builder.String()
 	}
+	if map_val, ok := value.(map[interface{}]interface{}); ok {
+		var builder strings.Builder
+		builder.WriteString("#[")
+		i := 0
+		for key, val := range map_val {
+			if i > 0 {
+				builder.WriteString(" ")
+			}
+			builder.WriteString(value_repr(key))
+			builder.WriteString(":")
+			builder.WriteString(value_repr(val))
+			i += 1
+		}
+		builder.WriteString("]")
+		return builder.String()
+	}
 	if byte_val, ok := value.(byte); ok {
 		var builder strings.Builder
 		builder.WriteByte('\'')
 		builder.WriteByte(byte_val)
 		builder.WriteByte('\'')
 		return builder.String()
+	}
+	if str_val, ok := value.(string); ok {
+		return "\"" + str_val + "\""
 	}
 	return fmt.Sprintf("%v", value)
 }
@@ -1576,6 +1660,10 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 		}
 		if op.Type == OpTypePushNil {
 			stack = append(stack, StackEntry{[]interface{}{}, op.Value})
+			return stack
+		}
+		if op.Type == OpTypePushNilMap {
+			stack = append(stack, StackEntry{map[interface{}]interface{}{}, op.Value})
 			return stack
 		}
 		if op.Type == OpTypeName {
@@ -1852,6 +1940,36 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 			}
 			return stack
 		}
+		if op.Type == OpTypeIn {
+			entry_key := stack[len(stack)-1]
+			entry_map := stack[len(stack)-2]
+			stack = stack[:len(stack)-2]
+			if a_map, ok := entry_map.Value.(map[interface{}]interface{}); ok {
+				switch entry_key.Value.(type) {
+				case []interface{}:
+					repr := value_repr(entry_key.Value)
+					if repr[0] == '"' && repr[len(repr)-1] == '"' {
+						repr = repr[1 : len(repr)-1]
+						_, in_map := a_map[repr]
+						if in_map {
+							stack = append(stack, StackEntry{1, op.Value})
+						} else {
+							stack = append(stack, StackEntry{0, op.Value})
+						}
+						return stack
+					}
+					os.Exit(1)
+				default:
+					_, in_map := a_map[entry_key]
+					if in_map {
+						stack = append(stack, StackEntry{1, op.Value})
+					} else {
+						stack = append(stack, StackEntry{0, op.Value})
+					}
+				}
+			}
+			return stack
+		}
 		if op.Type == OpTypeSaveSymbol {
 			symbol_value_env[op.Value.Value] = StackEntry{stack[len(stack)-1].Value, op.Value}
 			return stack[:len(stack)-1]
@@ -1875,9 +1993,47 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 			}
 			return stack
 		}
+		if op.Type == OpTypeMapCons {
+			entry_map := stack[len(stack)-1]
+			entry_value := stack[len(stack)-2]
+			entry_key := stack[len(stack)-3]
+			stack = stack[:len(stack)-3]
+			if a_arr, ok := entry_map.Value.(map[interface{}]interface{}); ok {
+				switch entry_key.Value.(type) {
+				case []interface{}:
+					repr := value_repr(entry_key.Value)
+					if repr[0] == '"' && repr[len(repr)-1] == '"' {
+						a_arr[repr[1:len(repr)-1]] = entry_value.Value
+					}
+				default:
+					a_arr[entry_key.Value] = entry_value.Value
+				}
+				stack = append(stack, StackEntry{a_arr, op.Value})
+			}
+			return stack
+		}
 		if op.Type == OpTypeProp {
 			entry_prop := stack[len(stack)-1]
 			entry_struct := stack[len(stack)-2]
+			if map_val, ok := entry_struct.Value.(map[interface{}]interface{}); ok {
+				if list_val, ok := entry_prop.Value.([]interface{}); ok {
+					repr := value_repr(list_val)
+					if repr[0] == '"' && repr[len(repr)-1] == '"' {
+						repr = repr[1 : len(repr)-1]
+					}
+					value := map_val[repr]
+					if value == nil {
+						fmt.Printf("%s:%d:%d: ERROR: Attempting to get invalid key \"%s\" from map %s\n", append(entry_prop.Token.Location.Get(), repr, value_repr(entry_struct.Value))...)
+						os.Exit(1)
+					}
+					return append(stack, StackEntry{value, op.Value})
+				}
+				value := map_val[entry_prop.Value]
+				if value == nil {
+					fmt.Printf("%s:%d:%d: ERROR: Attempting to get invalid key %s from map %s\n", append(entry_prop.Token.Location.Get(), value_repr(entry_prop.Value), value_repr(entry_struct.Value))...)
+				}
+				return append(stack, StackEntry{value, op.Value})
+			}
 			stack = stack[:len(stack)-2]
 			struct_fields := entry_struct.Value.(ValueStruct).Values
 			prop_name := entry_prop.Value.([]interface{})
@@ -1913,6 +2069,14 @@ func interpret(program interface{}, stack []StackEntry) []StackEntry {
 				new_fields := []interface{}{Op{OpTypePushNil, tree.Token}}
 				for i := 0; i < len(field_stack); i++ {
 					new_fields = append(new_fields, Op{OpTypeCons, tree.Token})
+				}
+				stack = interpret(Tree{TreeTypeExpression, new_fields, tree.Token}, append(stack, field_stack...))
+				return stack
+			}
+			if name == "Map" {
+				new_fields := []interface{}{Op{OpTypePushNilMap, tree.Token}}
+				for i := 0; i < len(field_stack)/2; i++ {
+					new_fields = append(new_fields, Op{OpTypeMapCons, tree.Token})
 				}
 				stack = interpret(Tree{TreeTypeExpression, new_fields, tree.Token}, append(stack, field_stack...))
 				return stack
