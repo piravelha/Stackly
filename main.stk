@@ -1,4 +1,12 @@
 
-include "rule110"
+"Hello, World" :unknown
 
-rule110test rule110
+is? unknown of Int do
+    unknown 1 + :result
+end
+is? unknown of String do
+    unknown "!" ++ :result
+end
+
+result 1 + print
+
