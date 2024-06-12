@@ -74,6 +74,7 @@ const (
 	OpTypeLt         = iota
 	OpTypeGt         = iota
 	OpTypeEq         = iota
+	OpTypeNeq        = iota
 	OpTypeAnd        = iota
 	OpTypeOr         = iota
 	OpTypeNot        = iota
@@ -114,6 +115,7 @@ const (
 	TreeTypeMacro      = iota
 	TreeTypeQuote      = iota
 	TreeTypeIsType     = iota
+	TreeTypeErrorType  = iota
 )
 
 type Tree struct {
@@ -338,7 +340,11 @@ func parse_atom(tokens []Token, current_macros []string, macro_id int, eval bool
 					token := token_results[0]
 					elem, tokens := parse_atom(append([]Token{{token.Type, token.Value, tokens[0].Location}}, tokens[1:]...), current_macros, macro_id, eval)
 					if elem_type, ok := elem.(Type); ok {
-						fmt.Println(elem_type)
+						return Type{RawTypeList, []interface{}{elem_type}}, tokens
+					}
+				} else {
+					elem, tokens := parse_atom(tokens[1:], current_macros, macro_id, eval)
+					if elem_type, ok := elem.(Type); ok {
 						return Type{RawTypeList, []interface{}{elem_type}}, tokens
 					}
 				}
@@ -408,6 +414,9 @@ func parse_atom(tokens []Token, current_macros []string, macro_id int, eval bool
 		if tokens[0].Value == "=" {
 			return Op{OpTypeEq, tokens[0]}, tokens[1:]
 		}
+		if tokens[0].Value == "!=" {
+			return Op{OpTypeNeq, tokens[0]}, tokens[1:]
+		}
 		if tokens[0].Value == "&" {
 			return Op{OpTypeAnd, tokens[0]}, tokens[1:]
 		}
@@ -450,6 +459,11 @@ func parse_atom(tokens []Token, current_macros []string, macro_id int, eval bool
 		if tokens[0].Value == "is?" {
 			istype := tokens[0]
 			value, tokens := parse(tokens[1:], current_macros, macro_id, eval)
+			inverted := false
+			if len(tokens) != 0 && tokens[0].Value == "not" {
+				inverted = true
+				tokens = tokens[1:]
+			}
 			if len(tokens) == 0 || tokens[0].Value != "of" {
 				fmt.Printf("%s:%d:%d: PARSE ERROR: Unterminated 'is?' compile-time check\n", istype.Location.Get()...)
 				os.Exit(1)
@@ -464,7 +478,32 @@ func parse_atom(tokens []Token, current_macros []string, macro_id int, eval bool
 			if len(tokens) == 0 || tokens[0].Value != "end" {
 				fmt.Printf("%s:%d:%d: PARSE ERROR: Unterminated 'is?' compile-time check\n", istype.Location.Get()...)
 			}
-			return Tree{TreeTypeIsType, []interface{}{value, typ_type, body}, tokens[0]}, tokens[1:]
+			return Tree{TreeTypeIsType, []interface{}{value, typ_type, body, inverted}, istype}, tokens[1:]
+		}
+		if tokens[0].Value == "error?" {
+			istype := tokens[0]
+			value, tokens := parse(tokens[1:], current_macros, macro_id, eval)
+			inverted := false
+			if len(tokens) != 0 && tokens[0].Value == "not" {
+				inverted = true
+				tokens = tokens[1:]
+			}
+			if len(tokens) == 0 || tokens[0].Value != "of" {
+				fmt.Printf("%s:%d:%d: PARSE ERROR: Unterminated 'is?' compile-time check\n", istype.Location.Get()...)
+				os.Exit(1)
+			}
+			typ, tokens := parse(tokens[1:], current_macros, macro_id, eval)
+			typ_type := typ.(Tree).Nodes[0]
+			if len(tokens) == 0 || tokens[0].Value != "with" {
+				fmt.Printf("%s:%d:%d: PARSE ERROR: Unterminated 'is?' compile-time check\n", istype.Location.Get()...)
+				os.Exit(1)
+			}
+			str := tokens[1]
+			if str.Type != TokenTypeString {
+				fmt.Printf("%s:%d:%d: PARSE ERROR: Unterminated 'is?' compile-time check\n", istype.Location.Get()...)
+				os.Exit(1)
+			}
+			return Tree{TreeTypeErrorType, []interface{}{value, typ_type, str, inverted}, str}, tokens[2:]
 		}
 		if tokens[0].Value == "then" {
 			then := tokens[0]
@@ -654,7 +693,7 @@ func parse_atom(tokens []Token, current_macros []string, macro_id int, eval bool
 			return Op{OpTypeName, tokens[0]}, tokens[1:]
 		}
 		is_keyword := false
-		for _, keyword := range []string{"then", "define", "else", "elif", "do", "end", "while", "loop", "struct", "is?", "of"} {
+		for _, keyword := range []string{"then", "define", "else", "elif", "do", "end", "while", "loop", "struct", "is?", "of", "not", "with"} {
 			if tokens[0].Value == keyword {
 				is_keyword = true
 			}
@@ -792,6 +831,7 @@ func init_repr_maps() {
 	op_type_names[increase_op_type_count()] = "<"
 	op_type_names[increase_op_type_count()] = ">"
 	op_type_names[increase_op_type_count()] = "="
+	op_type_names[increase_op_type_count()] = "!="
 	op_type_names[increase_op_type_count()] = "&"
 	op_type_names[increase_op_type_count()] = "|"
 	op_type_names[increase_op_type_count()] = "!"
@@ -1002,7 +1042,7 @@ func get_symbol_type(typ Type) Type {
 	return typ
 }
 
-func typecheck(program interface{}, stack []TypeStackEntry) ([]TypeStackEntry, interface{}) {
+func typecheck(program interface{}, stack []TypeStackEntry, eval bool) ([]TypeStackEntry, interface{}) {
 	if op, ok := program.(Op); ok {
 		if op.Type == OpTypeNoOp {
 			return stack, op
@@ -1101,7 +1141,7 @@ func typecheck(program interface{}, stack []TypeStackEntry) ([]TypeStackEntry, i
 			for sym, typ := range quote_entry.Type.Args[1].(map[string]Type) {
 				symbol_type_env[sym] = typ
 			}
-			stack, _ := typecheck(body, stack)
+			stack, _ := typecheck(body, stack, eval)
 			symbol_type_env = old_env
 			return stack, op
 		}
@@ -1156,6 +1196,25 @@ func typecheck(program interface{}, stack []TypeStackEntry) ([]TypeStackEntry, i
 			return append(stack, TypeStackEntry{Type{RawTypeInt, []interface{}{}}, op.Value}), op
 		}
 		if op.Type == OpTypeEq {
+			if len(stack) < 2 {
+				not_enough_args(op.Value, op.Type, 2, len(stack))
+			}
+			entry_a := stack[len(stack)-1]
+			entry_b := stack[len(stack)-2]
+			stack = stack[:len(stack)-2]
+			int_type_ := Type{RawTypeInt, []interface{}{}}
+			float_type_ := Type{RawTypeFloat, []interface{}{}}
+			if cmp_types(entry_a.Type, int_type_, op.Value) || cmp_types(entry_a.Type, float_type_, op.Value) && cmp_types(entry_b.Type, int_type_, op.Value) || cmp_types(entry_b.Type, float_type_, op.Value) {
+				stack = append(stack, TypeStackEntry{int_type_, op.Value})
+				return stack, op
+			}
+			if !cmp_types(entry_a.Type, entry_b.Type, op.Value) {
+				expected_type(op.Value, entry_b.Type, entry_a.Type, op.Type, "second")
+			}
+			stack = append(stack, TypeStackEntry{int_type_, op.Value})
+			return stack, op
+		}
+		if op.Type == OpTypeNeq {
 			if len(stack) < 2 {
 				not_enough_args(op.Value, op.Type, 2, len(stack))
 			}
@@ -1306,7 +1365,7 @@ func typecheck(program interface{}, stack []TypeStackEntry) ([]TypeStackEntry, i
 			builder.WriteString("(stack?): [")
 			for i := len(stack) - 1; i >= 0; i-- {
 				builder.WriteString("\n  ")
-				builder.WriteString(fmt.Sprintf("%d := ", len(stack)-i-1))
+				builder.WriteString(fmt.Sprintf("[%d] ", len(stack)-i-1))
 				builder.WriteString(get_type_repr(stack[i].Type))
 			}
 			builder.WriteString("\n]\n")
@@ -1502,14 +1561,14 @@ func typecheck(program interface{}, stack []TypeStackEntry) ([]TypeStackEntry, i
 		if tree.Type == TreeTypeNewStruct {
 			name := tree.Token.Value
 			fields_arr := tree.Nodes[0]
-			field_stack, _ := typecheck(fields_arr, []TypeStackEntry{})
+			field_stack, _ := typecheck(fields_arr, []TypeStackEntry{}, eval)
 			struct_fields, in_env := struct_type_env[name]
 			if name == "List" {
 				new_fields := []interface{}{Op{OpTypePushNil, tree.Token}}
 				for i := 0; i < len(field_stack); i++ {
 					new_fields = append(new_fields, Op{OpTypeCons, tree.Token})
 				}
-				stack, _ = typecheck(Tree{TreeTypeExpression, new_fields, tree.Token}, append(stack, field_stack...))
+				stack, _ = typecheck(Tree{TreeTypeExpression, new_fields, tree.Token}, append(stack, field_stack...), eval)
 				return stack, tree
 			}
 			if name == "Map" {
@@ -1517,7 +1576,7 @@ func typecheck(program interface{}, stack []TypeStackEntry) ([]TypeStackEntry, i
 				for i := 0; i < len(field_stack)/2; i++ {
 					new_fields = append(new_fields, Op{OpTypeMapCons, tree.Token})
 				}
-				stack, _ = typecheck(Tree{TreeTypeExpression, new_fields, tree.Token}, append(stack, field_stack...))
+				stack, _ = typecheck(Tree{TreeTypeExpression, new_fields, tree.Token}, append(stack, field_stack...), eval)
 				return stack, tree
 			}
 			if !in_env {
@@ -1550,7 +1609,7 @@ func typecheck(program interface{}, stack []TypeStackEntry) ([]TypeStackEntry, i
 		if tree.Type == TreeTypeExpression {
 			nodes := []interface{}{}
 			for _, tr := range tree.Nodes {
-				new_stack, op := typecheck(tr, stack)
+				new_stack, op := typecheck(tr, stack, eval)
 				stack = new_stack
 				nodes = append(nodes, op)
 			}
@@ -1567,7 +1626,7 @@ func typecheck(program interface{}, stack []TypeStackEntry) ([]TypeStackEntry, i
 			}
 			new := make([]TypeStackEntry, len(stack))
 			copy(new, stack)
-			new, _ = typecheck(tree.Nodes[0], new)
+			new, _ = typecheck(tree.Nodes[0], new, eval)
 			if len(stack) != len(new) {
 				modifies_structure(tree.Token, "'then' body")
 			}
@@ -1580,9 +1639,9 @@ func typecheck(program interface{}, stack []TypeStackEntry) ([]TypeStackEntry, i
 			for _, elseif_branch := range tree.Nodes[1].([]interface{}) {
 				copy_stack_3 := make([]TypeStackEntry, len(stack))
 				copy(copy_stack_3, stack)
-				elseif_stack, _ := typecheck(elseif_branch.([]interface{})[0], copy_stack_3)
+				elseif_stack, _ := typecheck(elseif_branch.([]interface{})[0], copy_stack_3, eval)
 				elseif_stack = elseif_stack[:len(elseif_stack)-1]
-				elseif_stack, _ = typecheck(elseif_branch.([]interface{})[1], elseif_stack)
+				elseif_stack, _ = typecheck(elseif_branch.([]interface{})[1], elseif_stack, eval)
 				if len(stack) != len(elseif_stack) {
 					modifies_structure(tree.Token, "'elif' body")
 				}
@@ -1607,11 +1666,11 @@ func typecheck(program interface{}, stack []TypeStackEntry) ([]TypeStackEntry, i
 			if !cmp_types(cond.Type, Type{RawTypeInt, []interface{}{}}, tree.Token) {
 				expected_type(cond.Token, Type{RawTypeInt, []interface{}{}}, cond.Type, TreeTypeThen, "first")
 			}
-			then_stack, _ := typecheck(tree.Nodes[0], copy_stack_1)
+			then_stack, _ := typecheck(tree.Nodes[0], copy_stack_1, eval)
 			for _, elseif_branch := range tree.Nodes[1].([]interface{}) {
 				copy_stack_3 := make([]TypeStackEntry, len(stack))
 				copy(copy_stack_3, stack)
-				elseif_stack, _ := typecheck(elseif_branch.([]interface{})[1], copy_stack_3)
+				elseif_stack, _ := typecheck(elseif_branch.([]interface{})[1], copy_stack_3, eval)
 				if len(then_stack) != len(elseif_stack) {
 					modifies_structure(tree.Token, "'elif' body")
 				}
@@ -1624,7 +1683,7 @@ func typecheck(program interface{}, stack []TypeStackEntry) ([]TypeStackEntry, i
 					then_stack[i] = TypeStackEntry{instantiate_types(a.Type, b.Type), a.Token}
 				}
 			}
-			else_stack, _ := typecheck(tree.Nodes[2], copy_stack_2)
+			else_stack, _ := typecheck(tree.Nodes[2], copy_stack_2, eval)
 			if len(then_stack) != len(else_stack) {
 				modifies_structure(tree.Token, "'else' body")
 			}
@@ -1641,7 +1700,7 @@ func typecheck(program interface{}, stack []TypeStackEntry) ([]TypeStackEntry, i
 		if tree.Type == TreeTypeWhile {
 			new := make([]TypeStackEntry, len(stack))
 			copy(new, stack)
-			new, _ = typecheck(tree.Nodes[0], new)
+			new, _ = typecheck(tree.Nodes[0], new, eval)
 			new = new[:len(new)-1]
 			if len(stack) != len(new) {
 				modifies_structure(tree.Token, "'while' condition")
@@ -1652,7 +1711,7 @@ func typecheck(program interface{}, stack []TypeStackEntry) ([]TypeStackEntry, i
 					modifies_structure(b.Token, "'while' condition")
 				}
 			}
-			new, _ = typecheck(tree.Nodes[1], new)
+			new, _ = typecheck(tree.Nodes[1], new, eval)
 			if len(stack) != len(new) {
 				modifies_structure(tree.Token, "'while' body")
 			}
@@ -1668,9 +1727,10 @@ func typecheck(program interface{}, stack []TypeStackEntry) ([]TypeStackEntry, i
 			value := tree.Nodes[0]
 			typ := tree.Nodes[1]
 			body := tree.Nodes[2]
+			inverted := tree.Nodes[3].(bool)
 			copy_stack := make([]TypeStackEntry, len(stack))
 			copy(copy_stack, stack)
-			copy_stack, _ = typecheck(value, copy_stack)
+			copy_stack, _ = typecheck(value, copy_stack, eval)
 			if len(copy_stack)-len(stack) != 1 {
 				modifies_structure(tree.Token, "'is?' condition")
 			}
@@ -1684,7 +1744,7 @@ func typecheck(program interface{}, stack []TypeStackEntry) ([]TypeStackEntry, i
 			if cmp_types(value_type.Type, typ.(Type), tree.Token) {
 				body_stack := make([]TypeStackEntry, len(stack))
 				copy(body_stack, stack)
-				body_stack, body = typecheck(body, body_stack)
+				body_stack, body = typecheck(body, body_stack, false)
 				if len(body_stack) != len(stack) {
 					modifies_structure(tree.Token, "'is?' body")
 				}
@@ -1694,7 +1754,50 @@ func typecheck(program interface{}, stack []TypeStackEntry) ([]TypeStackEntry, i
 						modifies_structure(b.Token, "'is?' body")
 					}
 				}
+				if inverted {
+					return stack, Op{OpTypeNoOp, tree.Token}
+				}
+				stack, body = typecheck(body, stack, eval)
 				return stack, body
+			}
+			if inverted {
+				stack, body = typecheck(body, stack, eval)
+				return stack, body
+			}
+			return stack, Op{OpTypeNoOp, tree.Token}
+		}
+		if tree.Type == TreeTypeErrorType {
+			value := tree.Nodes[0]
+			typ := tree.Nodes[1]
+			message := tree.Nodes[2].(Token)
+			inverted := tree.Nodes[3].(bool)
+			copy_stack := make([]TypeStackEntry, len(stack))
+			copy(copy_stack, stack)
+			copy_stack, _ = typecheck(value, copy_stack, eval)
+			if len(copy_stack)-len(stack) != 1 {
+				modifies_structure(tree.Token, "'error?' condition")
+			}
+			for i, a := range stack {
+				b := copy_stack[i]
+				if !cmp_types(a.Type, b.Type, tree.Token) {
+					modifies_structure(b.Token, "'error?' condition")
+				}
+			}
+			value_type := copy_stack[len(copy_stack)-1]
+			if cmp_types(value_type.Type, typ.(Type), tree.Token) {
+				if inverted {
+					return stack, Op{OpTypeNoOp, tree.Token}
+				}
+				if eval {
+					fmt.Printf("%s:%d:%d: TYPE ASSERTION ERROR: %s\n", append(tree.Token.Location.Get(), message.Value)...)
+					os.Exit(1)
+				}
+			}
+			if inverted {
+				if eval {
+					fmt.Printf("%s:%d:%d: TYPE ASSERTION ERROR: %s\n", append(tree.Token.Location.Get(), message.Value)...)
+					os.Exit(1)
+				}
 			}
 			return stack, Op{OpTypeNoOp, tree.Token}
 		}
@@ -1781,6 +1884,9 @@ func cmp_values(a interface{}, b interface{}) bool {
 	switch a.(type) {
 	case []interface{}:
 		min := 0
+		if _, isnt := b.([]interface{}); !isnt {
+			return false
+		}
 		if len(a.([]interface{})) > len(b.([]interface{})) {
 			min = len(b.([]interface{}))
 		} else {
@@ -2016,6 +2122,18 @@ func simulate(program interface{}, stack []StackEntry) []StackEntry {
 				stack = append(stack, StackEntry{1, op.Value})
 			} else {
 				stack = append(stack, StackEntry{0, op.Value})
+			}
+			return stack
+		}
+
+		if op.Type == OpTypeNeq {
+			entry_a := stack[len(stack)-1]
+			entry_b := stack[len(stack)-2]
+			stack = stack[:len(stack)-2]
+			if cmp_values(entry_a.Value, entry_b.Value) {
+				stack = append(stack, StackEntry{0, op.Value})
+			} else {
+				stack = append(stack, StackEntry{1, op.Value})
 			}
 			return stack
 		}
@@ -2450,7 +2568,7 @@ func main() {
 
 	tokens := lex("main.stk", text)
 	tree := parse_tokens(tokens)
-	type_stack, new_tree := typecheck(tree, []TypeStackEntry{})
+	type_stack, new_tree := typecheck(tree, []TypeStackEntry{}, true)
 	if len(type_stack) > 0 {
 		fmt.Printf("%s:%d:%d: TYPE ERROR: Unhandled data on the stack\n", type_stack[len(type_stack)-1].Token.Location.Get()...)
 		os.Exit(1)

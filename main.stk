@@ -1,12 +1,14 @@
-
-"Hello, World" :unknown
-
-is? unknown of Int do
-    unknown 1 + :result
+define @Box
+    :value
+    is? value not of Int do
+        error? value not of Char
+        with "Boxed value must be an int or a char"
+    end
+    struct Box
+        "value" 'value
+    end
+    Box{value}
 end
-is? unknown of String do
-    unknown "!" ++ :result
-end
 
-result 1 + print
+'a' @Box print
 
